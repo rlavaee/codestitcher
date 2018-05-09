@@ -180,6 +180,12 @@ if [ $LLVM_STATE -eq "2" ]; then
 		echo "Failed: Please check ${STATES_DIR}/llvm.log"
 		exit -1
 	fi
+	make -j${CPUS} llvm-nm &> ${STATES_DIR}/llvm-nm.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		echo "Failed: Please check ${STATES_DIR}/llvm-nm.log"
+		exit -1
+	fi
 	set -e
 	LLVM_STATE=3
 	echo $LLVM_STATE > ${STATES_DIR}/llvm.state

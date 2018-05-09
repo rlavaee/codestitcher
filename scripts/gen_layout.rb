@@ -13,7 +13,7 @@ require "optparse"
 
 script_dir = File.dirname(__FILE__)
 PERF_BIN = File.join(script_dir,"..","build","perf","perf")
-LLVM_BIN = File.join(script_dir,"..","build","llvm","bin","llvm-nm")
+LLVM_NM_BIN = File.join(script_dir,"..","build","llvm","bin","llvm-nm")
 
 options = Hash.new
 

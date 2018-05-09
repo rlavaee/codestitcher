@@ -287,7 +287,7 @@ class DSO
 	def self.load_from_symbols(exe_file_path)
 		new_dso = DSO.new(exe_file_path)
 		puts "reading exe syms for: #{exe_file_path}"
-		IO.popen("llvm-nm --numeric-sort --print-size #{exe_file_path}","r") do |nm_pipe|
+		IO.popen("#{LLVM_NM_BIN} --numeric-sort --print-size #{exe_file_path}","r") do |nm_pipe|
 			nm_pipe.each_line do |line|
 				tokens = line.chomp.gsub(/\s+/m,' ').strip.split(" ")
 				tokens[-1] = tokens[-1].strip
