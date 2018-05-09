@@ -13,6 +13,7 @@ function join {
 
 set -e
 CPUS=`grep -c ^processor /proc/cpuinfo`
+CPUS=$((CPUS-1))
 TOP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SOURCE_DIR=${TOP_DIR}/source
 BUILD_DIR=${TOP_DIR}/build
@@ -118,7 +119,8 @@ if [ $PERF_STATE -eq "2" ]; then
 	make -j${CPUS} &> ${STATES_DIR}/perf.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
-		"Failed: Please check ${STATES_DIR}/perf.log"
+		echo "Failed: Please check ${STATES_DIR}/perf.log"
+		exit -1
 	fi
 	set -e
 	cp ${LINUX_SRC_DIR}/tools/perf/perf ${PERF_BIN_DIR}/perf
@@ -142,12 +144,14 @@ if [ $BINUTILS_STATE -eq "2" ]; then
 	${BINUTILS_SRC_DIR}/configure CXX=g++ CC=gcc --enable-gold --enable-plugins --disable-werror &> ${STATES_DIR}/binutils.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
-		"Failed: Please check ${STATES_DIR}/binutils.log"
+		echo "Failed: Please check ${STATES_DIR}/binutils.log"
+		exit -1
 	fi
 	make -j$CPUS &> ${STATES_DIR}/binutils.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
-		"Failed: Please check ${STATES_DIR}/binutils.log"
+		echo "Failed: Please check ${STATES_DIR}/binutils.log"
+		exit -1
 	fi
 	set -e
 	mkdir -p ${BINUTILS_BUILD_DIR}/bin
@@ -167,12 +171,14 @@ if [ $LLVM_STATE -eq "2" ]; then
 	cmake ${LLVM_SRC_DIR} -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=host -DLLVM_ENABLE_CXX1Y=ON -DLLVM_BUILD_TESTS=OFF -DLLVM_BINUTILS_INCDIR=${BINUTILS_SRC_DIR}/include -DLLVM_BUILD_TOOLS=OFF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ &> ${STATES_DIR}/llvm.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
-		"Failed: Please check ${STATES_DIR}/llvm.log"
+		echo "Failed: Please check ${STATES_DIR}/llvm.log"
+		exit -1
 	fi
 	make -j${CPUS} &> ${STATES_DIR}/llvm.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
-		"Failed: Please check ${STATES_DIR}/llvm.log"
+		echo "Failed: Please check ${STATES_DIR}/llvm.log"
+		exit -1
 	fi
 	set -e
 	LLVM_STATE=3
