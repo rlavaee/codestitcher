@@ -127,7 +127,7 @@ if [ $PERF_STATE -eq "2" ]; then
 	PERF_STATE=3
 	echo $PERF_STATE > ${STATES_DIR}/perf.state
 	echo "testing to see if perf works with LBR (last branch record)"
-	${PERF_BIN_DIR}/perf record -e cycles -b -o perf-sanity.data -q -- sleep 1 &> /dev/null
+	${PERF_BIN_DIR}/perf record -e cycles:u -b -o perf-sanity.data -q -- sleep 1 &> /dev/null
 	if [ ! -f perf-sanity.data ]; then
 		echo "Failed: OS/Hardware does not support LBR!"
 		exit -1
