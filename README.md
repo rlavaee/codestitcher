@@ -3,12 +3,12 @@ Codestitcher enables interprocedural basic block code layout optimization on Lin
 
 It relies on LBR technology (last branch record), which is available on most Intel CPUs.
 
-To install:
+## To install:
   * run ./install.sh
   * This downloads the source directories for Linux kernel, Gold linker, and LLVM onto your machine (about 2GBs), patches them with the codestitcher patches (in the patch directory) and then builds llvm, binutils, and Linux perf utility. All the installed binaries and libraries will be placed in the build/ directory.
   * Note: The install script is stateful: if it crashes at one point, you will not lose the prior accomplished steps. In order to run a clean installation from scratch, run "./install.sh clean".
 
-To test:
+## To test:
   * cd test
   * make optimize
     - This compiles the base program with "clang -flto -Wl,-plugin-opt,-emit-bb-symbols", and using the gold linker.
@@ -18,6 +18,6 @@ To test:
     appropriate flags.
     - Finally, it recompiles the program with "clang -flto -Wl,-plugin-opt,-emit-bb-symbols -Wl,-plugin-opt,-bb-layout=cs" to let
     clang use the generated basic block layout.
-    
-    
-    
+
+### Large page support
+  Passing "-Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000" ensures that the hot code is loaded onto large 2MB pages.
