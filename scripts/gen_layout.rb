@@ -1,4 +1,5 @@
-#!/usr/bin/env ruby
+# Codestitcher
+# author Rahman Lavaee
 require_relative "ruby_util.rb"
 require_relative "succ.rb"
 require_relative "basic_block.rb"

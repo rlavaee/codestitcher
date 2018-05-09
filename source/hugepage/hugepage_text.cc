@@ -1,3 +1,11 @@
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+// Author: Ken Chen <kenchen@google.com>
+//
+// hugepage text library to remap process executable segment with hugepages.
+// Modified by: Rahman Lavaee <rlavaee@cs.rochester.edu>
+
 #include <link.h>
 #include <unistd.h>
 #include <sys/mman.h>

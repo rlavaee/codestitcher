@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 class BBNode
 	attr_accessor :prev_node
 	attr_accessor :next_node

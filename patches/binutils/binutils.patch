@@ -1,3 +1,4 @@
+#GPL-3.0-only
 diff -rc ../binutils-2.30/gold/defstd.cc binutils-2.30/gold/defstd.cc
 *** ../binutils-2.30/gold/defstd.cc	2018-01-13 08:31:16.000000000 -0500
 --- binutils-2.30/gold/defstd.cc	2018-05-04 17:31:42.625388466 -0400

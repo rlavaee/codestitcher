@@ -1,4 +1,5 @@
-#!/usr/bin/env ruby
+# Codestitcher
+# author Rahman Lavaee
 class HeapNode
 	@@count = 0
 	attr_reader :id

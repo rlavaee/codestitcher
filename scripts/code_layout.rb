@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 require_relative 'chain.rb'
 require_relative 'heap.rb'
 require_relative 'max_path_cover.rb'

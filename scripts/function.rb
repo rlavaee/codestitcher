@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 class Function
 	attr_reader :name
 	attr_accessor :dso

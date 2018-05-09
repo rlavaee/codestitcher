@@ -10,6 +10,7 @@ function join {
 	echo "$str"
 }
 
+
 set -e
 CPUS=`grep -c ^processor /proc/cpuinfo`
 TOP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -23,6 +24,10 @@ HUGEPAGE_SRC_DIR=${SOURCE_DIR}/hugepage
 BINUTILS_BUILD_DIR=${BUILD_DIR}/binutils
 LLVM_BUILD_DIR=${BUILD_DIR}/llvm
 PERF_BIN_DIR=${BUILD_DIR}/perf
+
+if [ "$1" = "clean" ]; then
+	rm -r ${STATES_DIR}/*
+fi
 
 mkdir -p ${SOURCE_DIR}
 mkdir -p ${BUILD_DIR}
@@ -55,6 +60,7 @@ fi
 
 echo "downloading base sources..."
 if [ "$BINUTILS_STATE" -eq "0" ]; then
+	rm -rf ${BINUTILS_SRC_DIR}
 	echo "downloading binutils-2.30"
 	wget http://ftp.gnu.org/gnu/binutils/binutils-2.30.tar.xz -P ${SOURCE_DIR} -q
 	tar -xf ${SOURCE_DIR}/binutils-2.30.tar.xz -C ${SOURCE_DIR}
@@ -64,6 +70,7 @@ if [ "$BINUTILS_STATE" -eq "0" ]; then
 fi
 
 if [ $LLVM_STATE -eq "0" ]; then
+	rm -rf ${LLVM_SRC_DIR}
 	echo "downloading llvm version 3.9 revision 301135"
 	svn co http://llvm.org/svn/llvm-project/llvm/branches/release_39/ ${LLVM_SRC_DIR} -q -r 301135
 	svn co http://llvm.org/svn/llvm-project/cfe/branches/release_39/ ${LLVM_SRC_DIR}/tools/clang -q -r 301135
@@ -72,6 +79,7 @@ if [ $LLVM_STATE -eq "0" ]; then
 fi
 
 if [ $PERF_STATE -eq "0" ]; then
+	rm -rf ${LINUX_SRC_DIR}
 	echo "downloading linux perf tool source"
 	wget https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.16.7.tar.xz -P ${SOURCE_DIR} -q
 	tar -xf ${SOURCE_DIR}/linux-4.16.7.tar.xz -C ${SOURCE_DIR}
@@ -83,35 +91,41 @@ fi
 echo "patching...."
 if [ $BINUTILS_STATE -eq "1" ]; then
 	echo "patching binutils"
-	patch -p0 -d ${SOURCE_DIR} < ${TOP_DIR}/patches/binutils.patch
+	patch -p0 -d ${SOURCE_DIR} < ${TOP_DIR}/patches/binutils/binutils.patch
 	BINUTILS_STATE=2
 	echo $BINUTILS_STATE > ${STATES_DIR}/binutils.state
 fi
 
 if [ $LLVM_STATE -eq "1" ]; then
 	echo "patching llvm"
-	patch -p0 -d ${LLVM_SRC_DIR} < ${TOP_DIR}/patches/llvm.patch
+	patch -p0 -d ${LLVM_SRC_DIR} < ${TOP_DIR}/patches/llvm/llvm.patch
 	LLVM_STATE=2
 	echo $LLVM_STATE > ${STATES_DIR}/llvm.state
 fi
 
 if [ $PERF_STATE -eq "1" ]; then
 	echo "patching perf"
-	patch -p0 -d ${SOURCE_DIR} < ${TOP_DIR}/patches/perf.patch
+	patch -p0 -d ${SOURCE_DIR} < ${TOP_DIR}/patches/perf/perf.patch
 	PERF_STATE=2
 	echo $PERF_STATE > ${STATES_DIR}/perf.state
 fi
 
 echo "building..."
 if [ $PERF_STATE -eq "2" ]; then
-	echo "building linux perf"
+	echo "building linux perf... (Look at ${STATES_DIR}/perf.log to monitor build output)"
 	cd ${LINUX_SRC_DIR}/tools/perf
-	make -j${CPUS} > /dev/null
+	set +e
+	make -j${CPUS} &> ${STATES_DIR}/perf.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		"Failed: Please check ${STATES_DIR}/perf.log"
+	fi
+	set -e
 	cp ${LINUX_SRC_DIR}/tools/perf/perf ${PERF_BIN_DIR}/perf
 	PERF_STATE=3
 	echo $PERF_STATE > ${STATES_DIR}/perf.state
 	echo "testing to see if perf works with LBR (last branch record)"
-	${PERF_BIN_DIR}/perf record -e cycles -b -o perf-sanity.data -q -- sleep 1
+	${PERF_BIN_DIR}/perf record -e cycles -b -o perf-sanity.data -q -- sleep 1 &> /dev/null
 	if [ ! -f perf-sanity.data ]; then
 		echo "Failed: OS/Hardware does not support LBR!"
 		exit -1
@@ -122,23 +136,45 @@ if [ $PERF_STATE -eq "2" ]; then
 fi
 
 if [ $BINUTILS_STATE -eq "2" ]; then
-	echo "building binutils"
+	echo "building binutils... (Look at ${STATES_DIR}/binutils.log to monitor build output)"
 	cd ${BINUTILS_BUILD_DIR}
-	${BINUTILS_SRC_DIR}/configure CXX=g++ CC=gcc --enable-gold --enable-plugins --disable-werror -q
-	make all-gold -j$CPUS > /dev/null
+	set +e
+	${BINUTILS_SRC_DIR}/configure CXX=g++ CC=gcc --enable-gold --enable-plugins --disable-werror &> ${STATES_DIR}/binutils.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		"Failed: Please check ${STATES_DIR}/binutils.log"
+	fi
+	make -j$CPUS &> ${STATES_DIR}/binutils.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		"Failed: Please check ${STATES_DIR}/binutils.log"
+	fi
+	set -e
 	mkdir -p ${BINUTILS_BUILD_DIR}/bin
 	ln -sf /bin/true ${BINUTILS_BUILD_DIR}/bin/ranlib
 	ln -sf ${BINUTILS_BUILD_DIR}/gold/ld-new ${BINUTILS_BUILD_DIR}/bin/ld
 	ln -sf ${BINUTILS_BUILD_DIR}/bfd/libtool ${BINUTILS_BUILD_DIR}/bin/libtool
+	ln -sf ${BINUTILS_BUILD_DIR}/binutils/ar ${BINUTILS_BUILD_DIR}/bin/ar
+	ln -sf ${BINUTILS_BUILD_DIR}/binutils/nm ${BINUTILS_BUILD_DIR}/bin/nm-new
 	BINUTILS_STATE=3
 	echo $BINUTILS_STATE > ${STATES_DIR}/binutils.state
 fi
 
 if [ $LLVM_STATE -eq "2" ]; then
-	echo "building llvm"
+	echo "building llvm... (Look at ${STATES_DIR}/llvm.log to monitor build output)"
 	cd ${LLVM_BUILD_DIR}
-	cmake ${LLVM_SRC_DIR} -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=host -DLLVM_ENABLE_CXX1Y=ON -DLLVM_BUILD_TESTS=OFF -DLLVM_BINUTILS_INCDIR=${BINUTILS_SRC_DIR}/include -DLLVM_BUILD_TOOLS=OFF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ > /dev/null
-	make -j${CPUS} --silent
+	set +e
+	cmake ${LLVM_SRC_DIR} -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=host -DLLVM_ENABLE_CXX1Y=ON -DLLVM_BUILD_TESTS=OFF -DLLVM_BINUTILS_INCDIR=${BINUTILS_SRC_DIR}/include -DLLVM_BUILD_TOOLS=OFF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ &> ${STATES_DIR}/llvm.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		"Failed: Please check ${STATES_DIR}/llvm.log"
+	fi
+	make -j${CPUS} &> ${STATES_DIR}/llvm.log
+	ec=$?
+	if [ ! $ec -eq 0 ]; then
+		"Failed: Please check ${STATES_DIR}/llvm.log"
+	fi
+	set -e
 	LLVM_STATE=3
 	echo $LLVM_STATE > ${STATES_DIR}/llvm.state
 fi
@@ -192,7 +228,7 @@ fi
 ruby -e "require 'graphviz'" &> /dev/null
 ec=$?
 if [ ! $ec -eq 0 ]; then
-	echo $str" Warning: ruby-graphviz gem is not installed!"
+	echo "Warning: ruby-graphviz gem is not installed!"
 	echo -e "\tCFG visualization will not work!"
 	echo -e "\tTo fix, install graphviz and its ruby gem:"
 	echo -e "\t\tsudo apt-get install ruby-graphviz"
@@ -201,4 +237,4 @@ fi
 
 echo "building hugepage"
 cd ${HUGEPAGE_SRC_DIR}
-make
+make &> ${STATES_DIR}/hugepage.log

@@ -2,6 +2,7 @@ LEVEL=..
 CC=$(LEVEL)/build/llvm/bin/clang
 CFLAGS=-flto -O3
 LDFLAGS=-B$(LEVEL)/build/binutils/bin/
+AR=$(LEVEL)/build/binutils/bin/ar
 ARFLAGS=--plugin $(LEVEL)/build/llvm/lib/LLVMgold.so
 
 all: optimize

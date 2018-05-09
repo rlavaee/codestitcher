@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 class CFGEdge
 	include Comparable
 	attr_accessor :prob

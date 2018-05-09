@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 require 'fileutils'
 
 class Profile < Hash

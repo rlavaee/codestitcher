@@ -1,3 +1,4 @@
+#GPL-2.0-only
 diff -ruN linux-4.16.7-orig/tools/perf/builtin-script.c linux-4.16.7/tools/perf/builtin-script.c
 --- linux-4.16.7-orig/tools/perf/builtin-script.c	2018-05-01 15:47:31.000000000 -0400
 +++ linux-4.16.7/tools/perf/builtin-script.c	2018-05-07 18:00:20.061127286 -0400

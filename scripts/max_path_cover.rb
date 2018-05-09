@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 require 'set'
 
 FIXNUM_MAX = (2**(0.size * 8 -2) -1)

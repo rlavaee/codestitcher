@@ -1,4 +1,5 @@
-#!/usr/bin/env ruby
+# Codestitcher
+# author Rahman Lavaee
 
 class LinkedList
 	attr_reader :head

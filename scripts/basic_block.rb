@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 require_relative "cfg_edge.rb"
 
 class BasicBlock

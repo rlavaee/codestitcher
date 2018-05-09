@@ -7,9 +7,8 @@ To install:
   * run ./install.sh
   * This downloads the source directories for Linux kernel, Gold linker, and LLVM onto your machine (about 2GBs),
   * patches them with the codestitcher patches (in the patch directory) and then builds llvm, binutils, and Linux perf
-  utility.
-  * The install script is stateful: if it crashes at one point, you will not lose the prior accomplished steps. In order to run
-  a clean installation from scratch, run ./install.sh clean
+  utility. All the installed binaries and libraries will be placed in the build/ directory.
+  * Note: The install script is stateful: if it crashes at one point, you will not lose the prior accomplished steps. In order to run a clean installation from scratch, run "./install.sh clean".
 
 To test:
   * cd test

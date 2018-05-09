@@ -1,0 +1,12 @@
+Each patch/source directory includes the corresponding license agreement.
+	The patch directories are:
+		patches/llvm/
+		patches/binutils/
+		patches/perf/
+
+	The source directories are:
+		scripts/
+		source/llvm-3.9/
+		source/binutils-2.30/
+		source/linux-4.16.7/
+		source/hugepage/

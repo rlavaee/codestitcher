@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 require 'json'
 require 'set'
 require 'graphviz' rescue LoadError

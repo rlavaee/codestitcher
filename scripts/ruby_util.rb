@@ -1,3 +1,6 @@
+# Codestitcher
+# author Rahman Lavaee
+
 class String
   def is_int?
     true if Integer(self) rescue false
