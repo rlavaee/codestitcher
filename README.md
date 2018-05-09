@@ -16,8 +16,10 @@ It relies on LBR technology (last branch record), which is available on most Int
     profile in "perf.data".
     - Then, it finds the optimal Codestitcher basic block layout (CS) for the program, by running "./scripts/gen_layout.rb" with 
     appropriate flags.
-    - Finally, it recompiles the program with "clang -flto -Wl,-plugin-opt,-emit-bb-symbols -Wl,-plugin-opt,-bb-layout=cs" to let
-    clang use the generated basic block layout.
+    - Finally, it recompiles the program with "clang -flto -Wl,-plugin-opt,-emit-bb-symbols -Wl,-plugin-opt,-bb-layout=cs" to let clang use the generated basic block layout.
+    - Test the optimized program's layout by comparing the results of "../build/llvm/bin/llvm-nm --numeric-sort test" and "cat test.layout.cs".
+    - Run the optimized program
+    - Optional: Try other implemented code layout techniques (PH, PHF, C3, C3F, CSS).
 
 ### Large page support
   For large programs (larger than 1MB), passing "-Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000" ensures that the hot code is loaded onto large 2MB pages.
