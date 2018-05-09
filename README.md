@@ -20,7 +20,7 @@ It relies on LBR technology (last branch record), which is available on most Int
     clang use the generated basic block layout.
 
 ### Large page support
-  Passing "-Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000" ensures that the hot code is loaded onto large 2MB pages.
-  To test this feature, run
+  For large programs (larger than 1MB), passing "-Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000" ensures that the hot code is loaded onto large 2MB pages.
+  To test this feature (even though it is not applicable for the provided small test case), run
 
   * make optimize-lp
