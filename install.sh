@@ -115,13 +115,16 @@ echo "building..."
 if [ $PERF_STATE -eq "2" ]; then
 	echo "building linux perf... (Look at ${STATES_DIR}/perf.log to monitor build output)"
 	echo "checking if libelf-dev is installed"
-	res=$(dpkg-query -W -f='${Status}')
-	if [ res!="install ok installed" ]; then
+        set +e
+        res=$(dpkg-query -W -f='${Status}' libelf-dev)
+        ec=$?
+	if [ $ec -eq 0 ]; then
+                echo "Success: libelf-dev is installed"
+        else
 		echo "Failed: libelf-dev is required: Please install it using sudo apt-get install libelf-dev"
 		exit -1
 	fi
 	cd ${LINUX_SRC_DIR}/tools/perf
-	set +e
 	make -j${CPUS} &> ${STATES_DIR}/perf.log
 	ec=$?
 	if [ ! $ec -eq 0 ]; then
