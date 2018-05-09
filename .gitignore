@@ -1,0 +1,13 @@
+build/
+source/binutils-2.30/
+source/llvm-3.9/
+source/linux-4.16.7/
+.states
+test/*
+!test/test.c
+!test/test_util.c
+!test/test_util.h
+!test/Makefile
+*.o
+*.a
+*.so

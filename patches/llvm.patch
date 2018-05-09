@@ -1,0 +1,2830 @@
+Index: include/llvm/CodeGen/AsmPrinter.h
+===================================================================
+--- include/llvm/CodeGen/AsmPrinter.h	(revision 301135)
++++ include/llvm/CodeGen/AsmPrinter.h	(working copy)
+@@ -89,6 +89,9 @@
+   /// This is a pointer to the current MachineModuleInfo.
+   MachineModuleInfo *MMI;
+ 
++  /// codestitcher: current MC section
++  MCSection *CurSection;
++
+   /// Name-mangler for global names.
+   ///
+   Mangler *Mang;
+@@ -97,6 +100,9 @@
+   /// of each call to runOnMachineFunction().
+   ///
+   MCSymbol *CurrentFnSym;
++  
++  /// codestitcher
++  MCSymbol *BBBeginLabel;
+ 
+   /// The symbol used to represent the start of the current function for the
+   /// purpose of calculating its size (e.g. using the .size directive). By
+@@ -107,6 +113,7 @@
+   /// its number of uses by other globals.
+   typedef std::pair<const GlobalVariable *, unsigned> GOTEquivUsePair;
+   MapVector<const MCSymbol *, GOTEquivUsePair> GlobalGOTEquivs;
++  DenseMap<const MachineBasicBlock *, MCSymbol*> MBBExceptionLabels;
+ 
+ private:
+   MCSymbol *CurrentFnBegin;
+@@ -113,6 +120,11 @@
+   MCSymbol *CurrentFnEnd;
+   MCSymbol *CurExceptionSym;
+ 
++  // code stitcher
++  const MachineBasicBlock * CurChainHead;
++  DenseMap<const MachineBasicBlock *, MCSymbol*> MBBBeginLabels;
++  DenseMap<const MachineBasicBlock *, MCSymbol*> MBBEndLabels;
++
+   // The garbage collection metadata printer table.
+   void *GCMetadataPrinters; // Really a DenseMap.
+ 
+@@ -162,6 +174,32 @@
+   MCSymbol *getFunctionEnd() const { return CurrentFnEnd; }
+   MCSymbol *getCurExceptionSym();
+ 
++  /// code stitcher
++  const MachineBasicBlock *getCurChainHead() const {
++    return CurChainHead;
++  }
++
++  MCSymbol *getMBBExceptionLabel(const MachineBasicBlock * MBB) const{
++    auto it = MBBExceptionLabels.find(MBB);
++    assert(it!=MBBExceptionLabels.end() && 
++           "MBB Is not a chain head or begin label is not set");
++    return it->second;
++  }
++  
++  MCSymbol *getMBBBeginLabel(const MachineBasicBlock * MBB) const{
++    auto it = MBBBeginLabels.find(MBB);
++    assert(it!=MBBBeginLabels.end() && 
++           "MBB Is not a chain head or begin label is not set");
++    return it->second;
++  }
++
++  MCSymbol *getMBBEndLabel(const MachineBasicBlock * MBB) const{
++    auto it = MBBEndLabels.find(MBB);
++    assert(it!=MBBEndLabels.end() && 
++           "MBB Is not a chain tail or end label is not set");
++    return it->second;
++  }
++
+   /// Return information about object file lowering.
+   const TargetLoweringObjectFile &getObjFileLowering() const;
+ 
+@@ -304,10 +342,10 @@
+   /// By default, this method prints the label for the specified
+   /// MachineBasicBlock, an alignment (if present) and a comment describing it
+   /// if appropriate.
+-  virtual void EmitBasicBlockStart(const MachineBasicBlock &MBB) const;
++  virtual void EmitBasicBlockStart(const MachineBasicBlock &MBB);
+ 
+   /// Targets can override this to emit stuff at the end of a basic block.
+-  virtual void EmitBasicBlockEnd(const MachineBasicBlock &MBB) {}
++  virtual void EmitBasicBlockEnd(const MachineBasicBlock &MBB);
+ 
+   /// Targets should implement this to emit instructions.
+   virtual void EmitInstruction(const MachineInstr *) {
+@@ -319,6 +357,9 @@
+ 
+   virtual void EmitFunctionEntryLabel();
+ 
++  /// code stitcher
++  void EmitFunctionEntryStuff();
++
+   virtual void EmitMachineConstantPoolValue(MachineConstantPoolValue *MCPV);
+ 
+   /// Targets can override this to change how global constants that are part of
+@@ -552,6 +593,8 @@
+   /// Emit GlobalAlias or GlobalIFunc.
+   void emitGlobalIndirectSymbol(Module &M,
+                                 const GlobalIndirectSymbol& GIS);
++  /// Whether we should emit bb symbols
++  bool shouldEmitBBSymbols() {return true;}
+ };
+ }
+ 
+Index: include/llvm/CodeGen/BBLayoutInput.h
+===================================================================
+--- include/llvm/CodeGen/BBLayoutInput.h	(nonexistent)
++++ include/llvm/CodeGen/BBLayoutInput.h	(working copy)
+@@ -0,0 +1,203 @@
++//=- MachineBranchProbabilityInfo.h - Branch Probability Analysis -*- C++ -*-=//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass is used to evaluate branch probabilties on machine basic blocks.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CODEGEN_BBLAYOUTINPUT_H
++#define LLVM_CODEGEN_BBLAYOUTINPUT_H
++
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++#include <fstream>
++#include <map>
++#include <vector>
++
++
++using namespace llvm;
++
++namespace llvm {
++  class LayoutBasicBlock {
++    public:
++      std::string fname;
++      unsigned bbid;
++      unsigned count;
++      unsigned addr;
++      bool is_lp;
++      std::map<unsigned,unsigned> succs;
++      std::map<std::pair<std::string,unsigned>,unsigned> preds;
++
++      LayoutBasicBlock(std::string _fname, unsigned _bbid, unsigned _count=0){
++        bbid = _bbid;
++        fname = _fname;
++        count = _count;
++      }
++
++      void addSucc(unsigned succ_bbid, unsigned succ_count){
++        succs[succ_bbid]=succ_count;
++      }
++
++      void addPred(std::string _fname, unsigned _bbid, unsigned _count=0){
++        preds[std::make_pair(_fname,_bbid)]=_count;
++      }
++   };
++
++   struct BlockInfo {
++     LayoutBasicBlock lbb;
++     bool hot;
++     bool align;
++     bool hasBestTarget;
++     unsigned bestTarget;
++     unsigned position;
++   };
++
++   class BBLayoutInput : public ImmutablePass {
++    public:
++      static char ID;
++      std::map<std::string, std::vector< std::vector < BlockInfo>>>  LayoutChains;
++      std::map<std::string, unsigned>  BBCount;
++      bool DoRemoveTailCalls;
++      unsigned hot_layout_end_index;
++      std::vector<std::string> hot_func_layout, cold_func_layout;
++      std::vector<LayoutBasicBlock> bb_layout;
++      std::vector<std::string> ChainList;
++      std::map<std::string, unsigned> FunctionPosition;
++      std::map<std::pair<std::string,unsigned>,size_t> bb_layout_position;
++		
++      unsigned getFunctionPosition(StringRef fname) const {
++        auto it = FunctionPosition.find(fname);
++        return it==FunctionPosition.end()?0:it->second;
++      }
++
++      void setLayoutData() {
++        std::string LastFunctionName = "";
++        bool UniqueSectionsForBB = false;
++        bool InLandingPadsSection = false;
++
++        for(auto it=bb_layout.begin(); it!=bb_layout.end(); ++it){
++          if(it->bbid==0)
++            FunctionPosition[it->fname] =  it-bb_layout.begin()+1;
++            bool is_in_hot = static_cast<unsigned>(it-bb_layout.begin()) < hot_layout_end_index;
++            BlockInfo bi = {*it, is_in_hot, false, false, 0, static_cast<unsigned>(it-bb_layout.begin())};
++
++          if((UniqueSectionsForBB && !InLandingPadsSection) || 
++             !StringRef(it->fname).equals(LastFunctionName) || 
++             (it->bbid==0)){
++               InLandingPadsSection = it->is_lp;
++               LayoutChains[it->fname].resize(LayoutChains[it->fname].size()+1);
++               ChainList.push_back(std::string(".text.stitch")+(bi.hot?".hot.":".cold.")+
++                                   it->fname+"_BB_"+
++                                   std::to_string(it->bbid));
++              LastFunctionName = it->fname;
++          }
++          
++          LayoutChains[it->fname].back().push_back(bi);
++          BBCount[it->fname]=std::max(it->bbid+1,BBCount[it->fname]);
++        }
++      }
++
++      BBLayoutInput() : ImmutablePass(ID) {}
++      
++      BBLayoutInput(StringRef BBLayoutFilePath, 
++                    bool RemoveTailCalls): ImmutablePass(ID) {
++        PassRegistry &Registry = *PassRegistry::getPassRegistry();
++        initializeBBLayoutInputPass(Registry);
++        DoRemoveTailCalls = RemoveTailCalls;
++        
++        std::ifstream fin(BBLayoutFilePath);
++        assert(fin && "Cannot open layout file\n");
++        char str[1 << 20];
++        bool in_cold_functions = false;
++        
++        while(fin) {
++          if(fin.getline(str, 1 << 20)){  // delim defaults to '\n'
++            if(in_cold_functions)
++              cold_func_layout.push_back(std::string(str));
++            else if(strcmp(str,"*cold_functions")==0)
++              in_cold_functions = true;
++            else if(strcmp(str,"*hot_layout_end")!=0){
++              char * fname_str = strtok(str,"*");
++              char * bbid_str = strtok(NULL,":");
++              char * count_str = strtok(NULL, "+");
++              std::string fname = std::string(fname_str);
++              unsigned bbid = (unsigned)atoi(bbid_str);
++              unsigned count = (unsigned)atoi(count_str);
++
++              LayoutBasicBlock lbb(fname,bbid,count);
++              char * all_succs_str = strtok(NULL,"+");
++              char * all_preds_str = strtok(NULL,"+");
++              char * bb_size_str = strtok(NULL,"+");
++              char * bb_lp_str = strtok(NULL,"+");
++						
++              if(strcmp(all_succs_str,".")!=0){
++                char * succ_bbid_str = strtok(all_succs_str,":");
++                while(succ_bbid_str!=NULL){
++                  char * succ_count_str = strtok(NULL,"#");
++                  unsigned succ_bbid = (unsigned)atoi(succ_bbid_str);
++                  unsigned succ_count = (unsigned)atoi(succ_count_str);
++                  lbb.addSucc(succ_bbid,succ_count);
++                  succ_bbid_str = strtok(NULL,":");
++                }
++              }
++						
++              if(strcmp(all_preds_str,".")!=0){
++                char * pred_fname_str = strtok(all_preds_str,"*");
++                while(pred_fname_str!=NULL){
++                  char * pred_bbid_str = strtok(NULL,":");
++                  char * pred_count_str = strtok(NULL,"#");
++                  std::string pred_fname  = std::string(pred_fname_str);
++                  unsigned pred_bbid = (unsigned)atoi(pred_bbid_str);
++                  unsigned pred_count = (unsigned)atoi(pred_count_str);
++                  lbb.addPred(pred_fname,pred_bbid,pred_count);
++                  pred_fname_str = strtok(NULL,"*");
++                }
++              }
++						
++              unsigned bb_size = (unsigned) atoi(bb_size_str);
++              lbb.is_lp =  (strcmp(bb_lp_str,"LP")==0);
++              lbb.addr = (bb_layout.empty())? (0) : (bb_layout.back().addr + bb_size);
++              bb_layout_position[std::make_pair(fname,bbid)]=bb_layout.size();
++              bb_layout.push_back(lbb);
++            }else
++              hot_layout_end_index = bb_layout.size();
++          }
++        }
++        fin.close();
++        setLayoutData();
++      }
++		
++      bool hasLayout() const{return !bb_layout.empty();}
++
++      void getLayoutChain (StringRef func_name, 
++                           std::vector<std::vector <BlockInfo>>& layout_chain) const{
++        auto it = LayoutChains.find(func_name);
++        if(it!=LayoutChains.end()){
++          for(auto chain: it->second)
++            if(chain.front().lbb.bbid == 0)
++              layout_chain.push_back(chain);
++          for(auto chain: it->second)
++            if(chain.front().lbb.bbid != 0)
++              layout_chain.push_back(chain);
++        }
++      }
++    
++      unsigned getBBCount (StringRef func_name) const {
++        auto it = BBCount.find(func_name);
++        return (it!=BBCount.end())?it->second:0;
++      }
++      
++      void getAnalysisUsage(AnalysisUsage &AU) const override {
++        AU.setPreservesAll();
++      }
++    };
++}
++
++#endif
++
+Index: include/llvm/CodeGen/FunctionLayoutInput.h
+===================================================================
+--- include/llvm/CodeGen/FunctionLayoutInput.h	(nonexistent)
++++ include/llvm/CodeGen/FunctionLayoutInput.h	(working copy)
+@@ -0,0 +1,64 @@
++//=- MachineBranchProbabilityInfo.h - Branch Probability Analysis -*- C++ -*-=//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass is used to evaluate branch probabilties on machine basic blocks.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CODEGEN_FUNCTIONLAYOUTINPUT_H
++#define LLVM_CODEGEN_FUNCTIONLAYOUTINPUT_H
++
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++#include <fstream>
++#include <set>
++
++
++using namespace llvm;
++
++namespace llvm {
++  class FunctionLayoutInput : public ImmutablePass {
++    public:
++     static char ID;
++     std::set<std::string> hot_funcs;
++
++     FunctionLayoutInput() : ImmutablePass(ID) {}
++		
++     FunctionLayoutInput(StringRef FunctionLayoutFilePath) : ImmutablePass(ID) {
++       PassRegistry &Registry = *PassRegistry::getPassRegistry();
++       initializeFunctionLayoutInputPass(Registry);
++       std::ifstream layout_file(FunctionLayoutFilePath);
++       std::string prefix(".text.stitch.hot.");
++       for (std::string line; std::getline(layout_file, line); ) {
++         /* remove leading space */
++         size_t first = line.find_first_not_of(' ');
++         if (std::string::npos != first){
++           std::string section_name = line.substr(first);
++           assert(section_name.compare(0, prefix.size(), prefix)==0 && 
++                  "section name does not start with .text.stitch.hot");
++           std::string func_name = section_name.substr(prefix.size());
++           hot_funcs.insert(func_name);
++         }
++       }
++     }
++
++    bool hasLayout() const{return !hot_funcs.empty();}
++
++    bool isFunctionHot (StringRef func_name) const {
++      return (hot_funcs.count(func_name)!=0);
++    }
++
++    void getAnalysisUsage(AnalysisUsage &AU) const override {
++      AU.setPreservesAll();
++    }
++  };
++}
++
++#endif
++
+Index: include/llvm/CodeGen/MachineBasicBlock.h
+===================================================================
+--- include/llvm/CodeGen/MachineBasicBlock.h	(revision 301135)
++++ include/llvm/CodeGen/MachineBasicBlock.h	(working copy)
+@@ -22,6 +22,7 @@
+ #include "llvm/MC/MCRegisterInfo.h"
+ #include "llvm/Support/DataTypes.h"
+ #include <functional>
++#include <map>
+ 
+ namespace llvm {
+ 
+@@ -81,6 +82,10 @@
+     RegisterMaskPair(MCPhysReg PhysReg, LaneBitmask LaneMask)
+         : PhysReg(PhysReg), LaneMask(LaneMask) {}
+   };
++  
++  std::map<unsigned,double> succEdge;
++  std::map<std::pair<std::string,unsigned>,std::pair<unsigned,double>> callerEdge;
++  unsigned execCount = 0;
+ 
+ private:
+   typedef ilist<MachineInstr> Instructions;
+@@ -88,6 +93,20 @@
+   const BasicBlock *BB;
+   int Number;
+   MachineFunction *xParent;
++   
++	uint64_t MBBBlockFreq = 0;
++  /// code stitcher : whether this block is the tail of a function chain
++  bool chainTail = false;
++  /// code stiticher: whether this block is hot
++  bool hotCode = false;
++  bool hasBestTarget = false;
++  unsigned bestTarget = 0;
++  unsigned position = std::numeric_limits<unsigned>::max();
++  /// code stitcher: get the head of the chain for this block
++  bool chainHead = false;
++  /// code stitcher: indicates that the tail jump has been removed for this basic block
++  bool tailRemoved = false;
++  StringRef tailFunction;
+ 
+   /// Keep track of the predecessor / successor basic blocks.
+   std::vector<MachineBasicBlock *> Predecessors;
+@@ -145,6 +164,12 @@
+   /// Return the name of the corresponding LLVM basic block, or "(null)".
+   StringRef getName() const;
+ 
++  /// code stitcher
++  std::string getFullBBName(const Pass *P) const;
++  std::string getBBName() const;
++  void setMBBBlockFreq(uint64_t freq) {MBBBlockFreq = freq;}
++  uint64_t getMBBBlockFreq() const {return MBBBlockFreq;}
++
+   /// Return a formatted string to identify this block and its parent function.
+   std::string getFullName() const;
+ 
+@@ -155,6 +180,33 @@
+   /// branch.
+   void setHasAddressTaken() { AddressTaken = true; }
+ 
++  /// codestitcher-functions: BEGIN
++  void setChainHead(bool arg){ chainHead = arg;}
++  bool isChainHead() const { return chainHead;}
++  void setChainTail(bool arg){ chainTail = arg;}
++  bool isChainTail() const { return chainTail;}
++  void setHotCode(bool arg){ hotCode = arg;}
++  void setExecCount(unsigned arg) {execCount = arg;}
++  void setEdge(unsigned succ_bbid, unsigned count) {succEdge[succ_bbid]=((double)count)/execCount;}
++  void setCallerEdge (std::pair<std::string,unsigned> caller_bb, 
++                      unsigned distance, 
++                      unsigned count){ 
++    callerEdge[caller_bb] = std::make_pair(distance,((double)count/execCount));
++  }
++  bool isHotCode() const {return hotCode;}
++  void setHasBestTarget(bool arg)  { hasBestTarget = arg;}
++  void setBestTarget(unsigned bbid)  { bestTarget=bbid;}
++  unsigned getBestTarget() const {return bestTarget;}
++  bool getHasBestTarget() const {return hasBestTarget;}
++  void setPosition(unsigned pos) {position=pos;}
++  unsigned getPosition() const {return position;}
++  void setTailRemoved(StringRef f_name) {
++    tailRemoved = true; 
++    tailFunction = f_name;
++  }
++  bool getTailRemoved() const {return tailRemoved;}
++  /// codestitcher-functions: END
++
+   /// Return the MachineFunction containing this basic block.
+   const MachineFunction *getParent() const { return xParent; }
+   MachineFunction *getParent() { return xParent; }
+Index: include/llvm/CodeGen/MachineBlockLayout.h
+===================================================================
+--- include/llvm/CodeGen/MachineBlockLayout.h	(nonexistent)
++++ include/llvm/CodeGen/MachineBlockLayout.h	(working copy)
+@@ -0,0 +1,55 @@
++#include "llvm/CodeGen/BBLayoutInput.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineLoopInfo.h"
++#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
++#include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
++#include "BranchFolding.h"
++#include "llvm/Target/TargetLowering.h"
++
++namespace llvm {
++  class MyBlockChain {
++   public:
++     SmallVector<std::pair<MachineBasicBlock *,bool>, 4> Blocks;
++  };
++
++  class MachineBlockLayout : public MachineFunctionPass {
++   public:
++     static char ID;
++     MachineFunction *F;
++     const BBLayoutInput *BLI;
++     const TargetInstrInfo *TII;
++     const MachineBranchProbabilityInfo* MBPI;
++
++     /// \brief A handle to the loop info.
++     MachineLoopInfo *MLI;
++
++     /// \brief A handle to the function-wide block frequency pass.
++     std::unique_ptr<BranchFolder::MBFIWrapper> MBFI;
++
++     /// \brief A handle to the target's lowering info.
++     const TargetLoweringBase *TLI;
++     SmallVector < MyBlockChain *, 16> FunctionChains;
++
++     SpecificBumpPtrAllocator<MyBlockChain> ChainAllocator;
++     DenseMap<MachineBasicBlock *, MyBlockChain *> BlockToChain;
++
++     MachineBlockLayout(): MachineFunctionPass(ID) {}
++
++     virtual const char *getPassName() const{
++       return "machine block layout";
++     }
++
++     bool runOnMachineFunction(MachineFunction &MF);
++			
++     void buildChains();
++     void alignBlocks();
++
++     void getAnalysisUsage(AnalysisUsage &AU) const {
++       AU.addRequired<BBLayoutInput>();
++       AU.addRequired<MachineBranchProbabilityInfo>();
++       AU.addRequired<MachineBlockFrequencyInfo>();
++       AU.addRequired<MachineLoopInfo>();
++       MachineFunctionPass::getAnalysisUsage(AU);
++     }
++  };
++}
+Index: include/llvm/CodeGen/MachineFunction.h
+===================================================================
+--- include/llvm/CodeGen/MachineFunction.h	(revision 301135)
++++ include/llvm/CodeGen/MachineFunction.h	(working copy)
+@@ -159,6 +159,8 @@
+ };
+ 
+ class MachineFunction {
++  /// codestitcher
++  bool chained = false;
+   const Function *Fn;
+   const TargetMachine &Target;
+   const TargetSubtargetInfo *STI;
+@@ -309,6 +311,10 @@
+   const WinEHFuncInfo *getWinEHFuncInfo() const { return WinEHInfo; }
+   WinEHFuncInfo *getWinEHFuncInfo() { return WinEHInfo; }
+ 
++  /// codestitcher
++  bool isChained() const {return chained;}
++  void setChained() {chained = true;}
++
+   /// getAlignment - Return the alignment (log2, not bytes) of the function.
+   ///
+   unsigned getAlignment() const { return Alignment; }
+Index: include/llvm/CodeGen/Passes.h
+===================================================================
+--- include/llvm/CodeGen/Passes.h	(revision 301135)
++++ include/llvm/CodeGen/Passes.h	(working copy)
+@@ -23,11 +23,13 @@
+ class Function;
+ class FunctionPass;
+ class MachineFunctionPass;
++class ImmutablePass;
+ class ModulePass;
+ class Pass;
+ class TargetMachine;
+ class TargetRegisterClass;
+ class raw_ostream;
++class StringRef;
+ 
+ } // End llvm namespace
+ 
+@@ -374,6 +376,14 @@
+   /// and propagates register usage information of callee to caller
+   /// if available with PysicalRegisterUsageInfo pass.
+   FunctionPass *createRegUsageInfoPropPass();
++
++  /// codestitcher-passes: BEGIN
++  ImmutablePass *createBBLayoutInputPass(StringRef,bool);
++  ImmutablePass *createFunctionLayoutInputPass(StringRef);
++  MachineFunctionPass *createMachineBlockLayoutPass();
++  MachineFunctionPass *createMBBRenumberingPass();
++  ModulePass *createRemapInHugePagesPass();
++  /// codestitcher-passes: END
+ } // End llvm namespace
+ 
+ /// Target machine pass initializer for passes with dependencies. Use with
+Index: include/llvm/CodeGen/TargetLoweringObjectFileImpl.h
+===================================================================
+--- include/llvm/CodeGen/TargetLoweringObjectFileImpl.h	(revision 301135)
++++ include/llvm/CodeGen/TargetLoweringObjectFileImpl.h	(working copy)
+@@ -53,6 +53,16 @@
+                                    const Constant *C,
+                                    unsigned &Align) const override;
+ 
++  /// codestitcher (to help with hfsort)
++  MCSection * HotSectionForFunction(const Function *F, 
++                                    Mangler &Mang,
++                                    const TargetMachine &TM) const override;
++
++  /// codestitcher
++  MCSection * getExplicitSectionBB(const MachineBasicBlock &MBB,
++                                   Mangler &Mang, 
++                                   const TargetMachine &TM) const override;
++
+   MCSection *getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
+                                       Mangler &Mang,
+                                       const TargetMachine &TM) const override;
+@@ -114,7 +124,16 @@
+   MCSection *getSectionForConstant(const DataLayout &DL, SectionKind Kind,
+                                    const Constant *C,
+                                    unsigned &Align) const override;
++  /// codestitcher (to help with hfsort)
++  MCSection * HotSectionForFunction(const Function *F, 
++                                    Mangler &Mang,
++                                    const TargetMachine &TM) const override;
+ 
++  /// codestitcher
++  MCSection * getExplicitSectionBB(const MachineBasicBlock &MBB,
++                                   Mangler &Mang, 
++                                   const TargetMachine &TM) const override;
++
+   /// The mach-o version of this method defaults to returning a stub reference.
+   const MCExpr *
+   getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+@@ -156,6 +175,18 @@
+   void getNameWithPrefix(SmallVectorImpl<char> &OutName, const GlobalValue *GV,
+                          Mangler &Mang, const TargetMachine &TM) const override;
+ 
++  /// codestitcher (to help with hfsort)
++  MCSection * HotSectionForFunction(const Function *F, 
++                                    Mangler &Mang,
++                                    const TargetMachine &TM) const override;
++
++  /// codestitcher
++  MCSection * getExplicitSectionBB(const MachineBasicBlock &MBB,
++                                   Mangler &Mang, 
++                                   const TargetMachine &TM) const override;
++
++
++
+   MCSection *getSectionForJumpTable(const Function &F, Mangler &Mang,
+                                     const TargetMachine &TM) const override;
+ 
+Index: include/llvm/InitializePasses.h
+===================================================================
+--- include/llvm/InitializePasses.h	(revision 301135)
++++ include/llvm/InitializePasses.h	(working copy)
+@@ -338,6 +338,13 @@
+ void initializeWinEHPreparePass(PassRegistry&);
+ void initializeWriteBitcodePassPass(PassRegistry &);
+ void initializeXRayInstrumentationPass(PassRegistry &);
++/// codestitcher-passes: BEGIN
++void initializeBBLayoutInputPass(PassRegistry&);
++void initializeFunctionLayoutInputPass(PassRegistry&);
++void initializeMachineBlockLayoutPass(PassRegistry&);
++void initializeMBBRenumberingPass(PassRegistry&);
++void initializeRemapInHugePagesPass(PassRegistry&);
++/// codestitcher-passes: END
+ }
+ 
+ #endif
+Index: include/llvm/LinkAllPasses.h
+===================================================================
+--- include/llvm/LinkAllPasses.h	(revision 301135)
++++ include/llvm/LinkAllPasses.h	(working copy)
+@@ -198,6 +198,12 @@
+       (void) llvm::createMemDerefPrinter();
+       (void) llvm::createFloat2IntPass();
+       (void) llvm::createEliminateAvailableExternallyPass();
++      /// codestitcher-passes: BEGIN
++      (void) llvm::createBBLayoutInputPass("",false);
++      (void) llvm::createFunctionLayoutInputPass("");
++      (void) llvm::createMachineBlockLayoutPass();
++      (void) llvm::createMBBRenumberingPass();
++      /// codestitcher-passes: END
+ 
+       (void)new llvm::IntervalPartition();
+       (void)new llvm::ScalarEvolutionWrapperPass();
+Index: include/llvm/MC/MCAssembler.h
+===================================================================
+--- include/llvm/MC/MCAssembler.h	(revision 301135)
++++ include/llvm/MC/MCAssembler.h	(working copy)
+@@ -415,6 +415,10 @@
+   /// @}
+ 
+   void dump();
++
++  /// codestitcher
++  static bool do_compare (const MCSection *lsec, const MCSection *rsec);
++
+ };
+ 
+ /// \brief Compute the amount of padding required before the fragment \p F to
+Index: include/llvm/MC/MCContext.h
+===================================================================
+--- include/llvm/MC/MCContext.h	(revision 301135)
++++ include/llvm/MC/MCContext.h	(working copy)
+@@ -55,6 +55,14 @@
+   public:
+     typedef StringMap<MCSymbol *, BumpPtrAllocator &> SymbolTable;
+ 
++    /// code stitcher
++    StringMap<unsigned> ChainOrderMap;
++
++    void setChainOrder (const std::vector<std::string> &ChainList){
++      for (unsigned i=0; i<ChainList.size(); ++i)
++        ChainOrderMap[StringRef(ChainList[i])] = i;
++    }
++
+   private:
+     /// The SourceMgr for this object, if any.
+     const SourceMgr *SrcMgr;
+Index: include/llvm/MC/MCDwarf.h
+===================================================================
+--- include/llvm/MC/MCDwarf.h	(revision 301135)
++++ include/llvm/MC/MCDwarf.h	(working copy)
+@@ -34,6 +34,7 @@
+ class MCSymbol;
+ class SourceMgr;
+ class SMLoc;
++class MachineInstr;
+ 
+ /// \brief Instances of this class represent the name of the dwarf
+ /// .file directive and its associated dwarf file number in the MC file,
+@@ -504,6 +505,7 @@
+   uint32_t CompactUnwindEncoding;
+   bool IsSignalFrame;
+   bool IsSimple;
++  std::vector<const MachineInstr*> CFIMachineInstrs;
+ };
+ 
+ class MCDwarfFrameEmitter {
+Index: include/llvm/MC/MCStreamer.h
+===================================================================
+--- include/llvm/MC/MCStreamer.h	(revision 301135)
++++ include/llvm/MC/MCStreamer.h	(working copy)
+@@ -162,11 +162,13 @@
+   MCContext &Context;
+   std::unique_ptr<MCTargetStreamer> TargetStreamer;
+ 
++  /// codestitcher
++  bool EmitBBSymbols = false;
++
+   MCStreamer(const MCStreamer &) = delete;
+   MCStreamer &operator=(const MCStreamer &) = delete;
+ 
+   std::vector<MCDwarfFrameInfo> DwarfFrameInfos;
+-  MCDwarfFrameInfo *getCurrentDwarfFrameInfo();
+   void EnsureValidDwarfFrame();
+ 
+   MCSymbol *EmitCFICommon();
+@@ -204,6 +206,11 @@
+   virtual void EmitRawTextImpl(StringRef String);
+ 
+ public:
++
++  /// codestitcher
++  bool shouldEmitBBSymbols(){ return EmitBBSymbols;}
++  void setShouldEmitBBSymbols(bool arg){ EmitBBSymbols=arg;}
++
+   virtual ~MCStreamer();
+ 
+   void visitUsedExpr(const MCExpr &Expr);
+@@ -229,6 +236,11 @@
+   }
+ 
+   bool hasUnfinishedDwarfFrameInfo();
++  /// codestitcher-functions: BEGIN
++  MCDwarfFrameInfo *getCurrentDwarfFrameInfo(); /* making getCurrentDwarfFrameInfo public */
++  void pushDwarfFrameInfo(MCDwarfFrameInfo DFI);
++  MCDwarfFrameInfo popDwarfFrameInfo();
++  /// codestitcher-functions: END
+ 
+   unsigned getNumWinFrameInfos() { return WinFrameInfos.size(); }
+   ArrayRef<WinEH::FrameInfo *> getWinFrameInfos() const {
+Index: include/llvm/Target/TargetLoweringObjectFile.h
+===================================================================
+--- include/llvm/Target/TargetLoweringObjectFile.h	(revision 301135)
++++ include/llvm/Target/TargetLoweringObjectFile.h	(working copy)
+@@ -19,6 +19,7 @@
+ #include "llvm/IR/Module.h"
+ #include "llvm/MC/MCObjectFileInfo.h"
+ #include "llvm/MC/SectionKind.h"
++#include "llvm/CodeGen/MachineBasicBlock.h"
+ 
+ namespace llvm {
+   class MachineModuleInfo;
+@@ -110,6 +111,14 @@
+   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
+                            Mangler &Mang, const TargetMachine &TM) const = 0;
+ 
++  /// codestitcher
++  virtual MCSection *
++  getExplicitSectionBB(const MachineBasicBlock &MBB,
++                       Mangler &Mang, const TargetMachine &TM) const = 0;
++
++  virtual MCSection * HotSectionForFunction(const Function *F, 
++                                            Mangler &Mang,const TargetMachine &TM) const = 0;
++
+   /// Allow the target to completely override section assignment of a global.
+   virtual const MCSection *getSpecialCasedSectionGlobals(const GlobalValue *GV,
+                                                          SectionKind Kind,
+Index: lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+===================================================================
+--- lib/CodeGen/AsmPrinter/AsmPrinter.cpp	(revision 301135)
++++ lib/CodeGen/AsmPrinter/AsmPrinter.cpp	(working copy)
+@@ -51,6 +51,9 @@
+ #include "llvm/Target/TargetLoweringObjectFile.h"
+ #include "llvm/Target/TargetRegisterInfo.h"
+ #include "llvm/Target/TargetSubtargetInfo.h"
++#include "llvm/CodeGen/BBLayoutInput.h"
++#include "llvm/CodeGen/FunctionLayoutInput.h"
++#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
+ using namespace llvm;
+ 
+ #define DEBUG_TYPE "asm-printer"
+@@ -111,6 +114,8 @@
+   CurrentFnEnd = nullptr;
+   GCMetadataPrinters = nullptr;
+   VerboseAsm = OutStreamer->isVerboseAsm();
++  /// codestitcher
++  CurChainHead = nullptr;
+ }
+ 
+ AsmPrinter::~AsmPrinter() {
+@@ -173,6 +178,7 @@
+   AU.addRequired<GCModuleInfo>();
+   if (isVerbose())
+     AU.addRequired<MachineLoopInfo>();
++  AU.addRequired<MachineBlockFrequencyInfo>();
+ }
+ 
+ bool AsmPrinter::doInitialization(Module &M) {
+@@ -255,7 +261,10 @@
+                                      DbgTimerName,
+                                      CodeViewLineTablesGroupName));
+     }
+-    if (!EmitCodeView || MMI->getModule()->getDwarfVersion()) {
++
++		//code stitcher: we don't support dwarf debug at this moment
++  	const BBLayoutInput *BLI = getAnalysisIfAvailable<BBLayoutInput>();
++    if (BLI==nullptr && (!EmitCodeView || MMI->getModule()->getDwarfVersion())) {
+       DD = new DwarfDebug(this, &M);
+       DD->beginModule();
+       Handlers.push_back(HandlerInfo(DD, DbgTimerName, DWARFGroupName));
+@@ -541,40 +550,54 @@
+   OutStreamer->AddBlankLine();
+ }
+ 
++void AsmPrinter::EmitFunctionEntryStuff() {
++  	const Function *F = MF->getFunction();
++	
++  	EmitVisibility(CurrentFnSym, F->getVisibility());
++
++  	EmitLinkage(F, CurrentFnSym);
++  	if (MAI->hasFunctionAlignment())
++    	EmitAlignment(MF->getAlignment(), F);
++
++  	if (MAI->hasDotTypeDotSizeDirective())
++    	OutStreamer->EmitSymbolAttribute(CurrentFnSym, MCSA_ELF_TypeFunction);
++
++  	if (isVerbose()) {
++    	F->printAsOperand(OutStreamer->GetCommentOS(),
++                   /*PrintType=*/false, F->getParent());
++   		 OutStreamer->GetCommentOS() << '\n';
++  	}
++
++  	// Emit the CurrentFnSym.  This is a virtual function to allow targets to
++  	// do their wild and crazy things as required.
++  	EmitFunctionEntryLabel();
++}
++
+ /// EmitFunctionHeader - This method emits the header for the current
+ /// function.
+ void AsmPrinter::EmitFunctionHeader() {
+   // Print out constants referenced by the function
++  // code stitcher move it to EmitFunctionBody
+   EmitConstantPool();
+-
++ 
+   // Print the 'header' of function.
+   const Function *F = MF->getFunction();
+ 
+-  OutStreamer->SwitchSection(
+-      getObjFileLowering().SectionForGlobal(F, *Mang, TM));
+-  EmitVisibility(CurrentFnSym, F->getVisibility());
++  if(!MF->isChained()){
++  	const FunctionLayoutInput *FLI = getAnalysisIfAvailable<FunctionLayoutInput>();
++		if(FLI!=nullptr && FLI->isFunctionHot(F->getName()))
++ 			OutStreamer->SwitchSection(CurSection=getObjFileLowering().HotSectionForFunction(F, *Mang, TM));
++		else	
++ 			OutStreamer->SwitchSection(CurSection=getObjFileLowering().SectionForGlobal(F, *Mang, TM));
++  	EmitFunctionEntryStuff();
++  }
+ 
+-  EmitLinkage(F, CurrentFnSym);
+-  if (MAI->hasFunctionAlignment())
+-    EmitAlignment(MF->getAlignment(), F);
+ 
+-  if (MAI->hasDotTypeDotSizeDirective())
+-    OutStreamer->EmitSymbolAttribute(CurrentFnSym, MCSA_ELF_TypeFunction);
++  	// Emit the prefix data.
++  	if (F->hasPrefixData())
++    	EmitGlobalConstant(F->getParent()->getDataLayout(), F->getPrefixData());
+ 
+-  if (isVerbose()) {
+-    F->printAsOperand(OutStreamer->GetCommentOS(),
+-                   /*PrintType=*/false, F->getParent());
+-    OutStreamer->GetCommentOS() << '\n';
+-  }
+ 
+-  // Emit the prefix data.
+-  if (F->hasPrefixData())
+-    EmitGlobalConstant(F->getParent()->getDataLayout(), F->getPrefixData());
+-
+-  // Emit the CurrentFnSym.  This is a virtual function to allow targets to
+-  // do their wild and crazy things as required.
+-  EmitFunctionEntryLabel();
+-
+   // If the function had address-taken blocks that got deleted, then we have
+   // references to the dangling symbols.  Emit them at the start of the function
+   // so that we don't get references to undefined symbols.
+@@ -585,8 +608,8 @@
+     OutStreamer->EmitLabel(DeadBlockSyms[i]);
+   }
+ 
+-  if (CurrentFnBegin) {
+-    if (MAI->useAssignmentForEHBegin()) {
++ if(!MF->isChained() && CurrentFnBegin){
++   if (MAI->useAssignmentForEHBegin()) {
+       MCSymbol *CurPos = OutContext.createTempSymbol();
+       OutStreamer->EmitLabel(CurPos);
+       OutStreamer->EmitAssignment(CurrentFnBegin,
+@@ -594,7 +617,7 @@
+     } else {
+       OutStreamer->EmitLabel(CurrentFnBegin);
+     }
+-  }
++ }
+ 
+   // Emit pre-function debug and/or EH information.
+   for (const HandlerInfo &HI : Handlers) {
+@@ -607,6 +630,8 @@
+     EmitGlobalConstant(F->getParent()->getDataLayout(), F->getPrologueData());
+ }
+ 
++
++
+ /// EmitFunctionEntryLabel - Emit the label that is the entrypoint for the
+ /// function.  This can be overridden by targets as required to do custom stuff.
+ void AsmPrinter::EmitFunctionEntryLabel() {
+@@ -819,6 +844,7 @@
+   if (needsCFIMoves() == CFI_M_None)
+     return;
+ 
++  OutStreamer->getCurrentDwarfFrameInfo()->CFIMachineInstrs.push_back(&MI);
+   const MachineModuleInfo &MMI = MF->getMMI();
+   const std::vector<MCCFIInstruction> &Instrs = MMI.getFrameInstructions();
+   unsigned CFIIndex = MI.getOperand(0).getCFIIndex();
+@@ -836,6 +862,20 @@
+                              MCConstantExpr::create(FrameOffset, OutContext));
+ }
+ 
++MCSymbol *AsmPrinter::getCurExceptionSym() {
++  std::string sym_name = "exception";
++  if(CurChainHead)
++    sym_name += "_"+CurChainHead->getBBName();
++  if (!CurExceptionSym)
++    CurExceptionSym = createTempSymbol(sym_name);
++  return CurExceptionSym;
++}
++
++static MCSymbol *getCurExceptionSymStatic(AsmPrinter *Asm) {
++  return Asm->getCurExceptionSym();
++}
++
++
+ /// EmitFunctionBody - This method emits the body and trailer for a
+ /// function.
+ void AsmPrinter::EmitFunctionBody() {
+@@ -849,8 +889,35 @@
+   // Print out code for the function.
+   bool HasAnyRealCode = false;
+   for (auto &MBB : *MF) {
++    if (MF->isChained() && MBB.isChainHead()){
++      /// codestitcher: switch section if this is the start of a new chain
++      CurChainHead = &MBB;
++      CurSection = getObjFileLowering().getExplicitSectionBB(*CurChainHead, *Mang, TM);
++      OutStreamer->SwitchSection(CurSection);
++
++      if (MBB.getNumber()==0)
++        EmitFunctionEntryStuff();
++      	
++      MCSymbol *FuncPartBeginSym =
++      createTempSymbol(CurChainHead->getFullBBName(this)+"_begin");
++      MBBBeginLabels[&MBB] = FuncPartBeginSym;
++      if (MAI->useAssignmentForEHBegin()) {
++        MCSymbol *CurPos = OutContext.createTempSymbol();
++        OutStreamer->EmitLabel(CurPos);
++        OutStreamer->EmitAssignment(FuncPartBeginSym,
++        MCSymbolRefExpr::create(CurPos, OutContext));
++      } else {
++        OutStreamer->EmitLabel(FuncPartBeginSym);
++      }
++
++      for (const HandlerInfo &HI : Handlers) {
++        HI.Handler->beginFragment(CurChainHead, getCurExceptionSymStatic);
++      }
++    }
++    
+     // Print a label for the basic block.
+     EmitBasicBlockStart(MBB);
++
+     for (auto &MI : MBB) {
+ 
+       // Print the assembly for the instruction.
+@@ -914,6 +981,21 @@
+     }
+ 
+     EmitBasicBlockEnd(MBB);
++    
++    /// code stitcher
++    if(MF->isChained()){
++      if(MBB.isChainTail()){
++        MCSymbol *FuncPartEndSym = createTempSymbol(MBB.getBBName()+"_end");
++        MBBEndLabels[&MBB] = FuncPartEndSym;
++      	OutStreamer->EmitLabel(FuncPartEndSym);
++        CurrentFnEnd = createTempSymbol("func_part_end");
++        OutStreamer->EmitLabel(CurrentFnEnd);
++        for (const HandlerInfo &HI : Handlers) {
++          HI.Handler->endFragment();
++        }
++        CurExceptionSym = nullptr;
++      }
++    }
+   }
+ 
+   // If the function is empty and the object file uses .subsections_via_symbols,
+@@ -944,28 +1026,29 @@
+   // Emit target-specific gunk after the function body.
+   EmitFunctionBodyEnd();
+ 
+-  if (!MMI->getLandingPads().empty() || MMI->hasDebugInfo() ||
+-      MMI->hasEHFunclets() || MAI->hasDotTypeDotSizeDirective()) {
+-    // Create a symbol for the end of function.
+-    CurrentFnEnd = createTempSymbol("func_end");
+-    OutStreamer->EmitLabel(CurrentFnEnd);
+-  }
+-
+-  // If the target wants a .size directive for the size of the function, emit
+-  // it.
+-  if (MAI->hasDotTypeDotSizeDirective()) {
+-    // We can get the size as difference between the function label and the
+-    // temp label.
+-    const MCExpr *SizeExp = MCBinaryExpr::createSub(
+-        MCSymbolRefExpr::create(CurrentFnEnd, OutContext),
++  if(!OutStreamer->shouldEmitBBSymbols() && !MF->isChained()){
++    if (!MMI->getLandingPads().empty() || MMI->hasDebugInfo() ||
++        MMI->hasEHFunclets() || MAI->hasDotTypeDotSizeDirective()) {
++      // Create a symbol for the end of function.
++      CurrentFnEnd = createTempSymbol("func_end");
++      OutStreamer->EmitLabel(CurrentFnEnd);
++    }
++    // If the target wants a .size directive for the size of the function, emit
++    // it.
++    if (MAI->hasDotTypeDotSizeDirective()) {
++      // We can get the size as difference between the function label and the
++      // temp label.
++      const MCExpr *SizeExp = MCBinaryExpr::createSub(
++	MCSymbolRefExpr::create(CurrentFnEnd, OutContext),
+         MCSymbolRefExpr::create(CurrentFnSymForSize, OutContext), OutContext);
+-    if (auto Sym = dyn_cast<MCSymbolELF>(CurrentFnSym))
+-      OutStreamer->emitELFSize(Sym, SizeExp);
++      if (auto Sym = dyn_cast<MCSymbolELF>(CurrentFnSym))
++        OutStreamer->emitELFSize(Sym, SizeExp);
++    }
+   }
+-
++  
+   for (const HandlerInfo &HI : Handlers) {
+     NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+-    HI.Handler->markFunctionEnd();
++    HI.Handler->markFunctionEnd(MF);
+   }
+ 
+   // Print out jump tables referenced by the function.
+@@ -976,6 +1059,7 @@
+     NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+     HI.Handler->endFunction(MF);
+   }
++
+   MMI->EndFunction();
+ 
+   OutStreamer->AddBlankLine();
+@@ -1249,6 +1333,10 @@
+   delete Mang; Mang = nullptr;
+   MMI = nullptr;
+ 
++  const BBLayoutInput *BLI = getAnalysisIfAvailable<BBLayoutInput>();
++  if(BLI != nullptr)
++		OutContext.setChainOrder(BLI->ChainList);
++
+   OutStreamer->Finish();
+   OutStreamer->reset();
+ 
+@@ -1255,11 +1343,6 @@
+   return false;
+ }
+ 
+-MCSymbol *AsmPrinter::getCurExceptionSym() {
+-  if (!CurExceptionSym)
+-    CurExceptionSym = createTempSymbol("exception");
+-  return CurExceptionSym;
+-}
+ 
+ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
+   this->MF = &MF;
+@@ -1275,6 +1358,8 @@
+     if (NeedsLocalForSize)
+       CurrentFnSymForSize = CurrentFnBegin;
+   }
++  /// codestitcher
++  CurChainHead = nullptr;
+ 
+   if (isVerbose())
+     LI = &getAnalysis<MachineLoopInfo>();
+@@ -2466,7 +2551,7 @@
+ /// EmitBasicBlockStart - This method prints the label for the specified
+ /// MachineBasicBlock, an alignment (if present) and a comment describing
+ /// it if appropriate.
+-void AsmPrinter::EmitBasicBlockStart(const MachineBasicBlock &MBB) const {
++void AsmPrinter::EmitBasicBlockStart(const MachineBasicBlock &MBB) {
+   // End the previous funclet and start a new one.
+   if (MBB.isEHFuncletEntry()) {
+     for (const HandlerInfo &HI : Handlers) {
+@@ -2479,6 +2564,11 @@
+   if (unsigned Align = MBB.getAlignment())
+     EmitAlignment(Align);
+ 
++  if (OutStreamer->shouldEmitBBSymbols()){
++    BBBeginLabel = OutContext.getOrCreateSymbol(MBB.getFullBBName(this));
++    OutStreamer->EmitLabel(BBBeginLabel);
++  }
++
+   // If the block has its address taken, emit any labels that were used to
+   // reference the block.  It is possible that there is more than one label
+   // here, because multiple LLVM BB's may have been RAUW'd to this block after
+@@ -2617,4 +2707,49 @@
+ /// Pin vtable to this file.
+ AsmPrinterHandler::~AsmPrinterHandler() {}
+ 
+-void AsmPrinterHandler::markFunctionEnd() {}
++void AsmPrinterHandler::markFunctionEnd(const  MachineFunction *) {}
++
++void AsmPrinter::EmitBasicBlockEnd(const MachineBasicBlock& MBB) {
++  if(OutStreamer->shouldEmitBBSymbols()){
++    // emit a temp label to get the size of this bb if needed
++    MCSymbol *BBEndLabel = OutContext.createTempSymbol("bb_end");
++    OutStreamer->EmitLabel(BBEndLabel);
++
++    if (MAI->hasDotTypeDotSizeDirective()) {
++      // We can get the size as difference between the BB begin label and the
++      // temp end label.
++      const MCExpr *SizeExp = MCBinaryExpr::createSub(
++      MCSymbolRefExpr::create(BBEndLabel, OutContext),
++      MCSymbolRefExpr::create(BBBeginLabel, OutContext), OutContext);
++      if (auto Sym = dyn_cast<MCSymbolELF>(BBBeginLabel))
++        OutStreamer->emitELFSize(Sym, SizeExp);
++    }
++
++    if(MBB.getNumber()==0){
++      // If this is the first basic block of the function and we are emitting 
++      // labels for basic blocks, we also need to emit a (fake) label for the
++      // end of the function right away
++
++      if (!MMI->getLandingPads().empty() || MMI->hasDebugInfo() ||
++          MMI->hasEHFunclets() || MAI->hasDotTypeDotSizeDirective()) {
++        // Create a symbol for the end of function.
++        CurrentFnEnd = createTempSymbol("func_end");
++        OutStreamer->EmitLabel(CurrentFnEnd);
++      }
++
++      // If the target wants a .size directive for the size of the function, emit
++      // it.
++
++      if (MAI->hasDotTypeDotSizeDirective()) {
++        // We can get the size as difference between the function label and the
++        // temp label.
++        const MCExpr *SizeExp = MCBinaryExpr::createSub(
++                                MCSymbolRefExpr::create(CurrentFnEnd, OutContext),
++                                MCSymbolRefExpr::create(CurrentFnSymForSize, OutContext), OutContext);
++        if (auto Sym = dyn_cast<MCSymbolELF>(CurrentFnSym))
++          OutStreamer->emitELFSize(Sym, SizeExp);
++      }
++    }
++  }
++
++}
+Index: lib/CodeGen/AsmPrinter/AsmPrinterHandler.h
+===================================================================
+--- lib/CodeGen/AsmPrinter/AsmPrinterHandler.h	(revision 301135)
++++ lib/CodeGen/AsmPrinter/AsmPrinterHandler.h	(working copy)
+@@ -47,7 +47,7 @@
+ 
+   // \brief Emit any of function marker (like .cfi_endproc). This is called
+   // before endFunction and cannot switch sections.
+-  virtual void markFunctionEnd();
++  virtual void markFunctionEnd(const MachineFunction *MF);
+ 
+   /// \brief Gather post-function debug information.
+   /// Please note that some AsmPrinter implementations may not call
+Index: lib/CodeGen/AsmPrinter/DwarfCFIException.cpp
+===================================================================
+--- lib/CodeGen/AsmPrinter/DwarfCFIException.cpp	(revision 301135)
++++ lib/CodeGen/AsmPrinter/DwarfCFIException.cpp	(working copy)
+@@ -41,9 +41,17 @@
+ DwarfCFIExceptionBase::DwarfCFIExceptionBase(AsmPrinter *A)
+     : EHStreamer(A), shouldEmitCFI(false) {}
+ 
+-void DwarfCFIExceptionBase::markFunctionEnd() {
+-  endFragment();
+-
++void DwarfCFIExceptionBase::markFunctionEnd(const MachineFunction *MF) {
++  if (MF->isChained()){
++    while(!InFlightCFIs.empty()){
++      Asm->OutStreamer->pushDwarfFrameInfo(InFlightCFIs.pop_back_val());
++      Asm->OutStreamer->SwitchSection(InFlightSections.pop_back_val());
++      if (shouldEmitCFI)
++        Asm->OutStreamer->EmitCFIEndProc();
++     }
++  }else if(shouldEmitCFI)
++     Asm->OutStreamer->EmitCFIEndProc();
++  
+   if (MMI->getLandingPads().empty())
+     return;
+ 
+@@ -52,8 +60,10 @@
+ }
+ 
+ void DwarfCFIExceptionBase::endFragment() {
+-  if (shouldEmitCFI)
+-    Asm->OutStreamer->EmitCFIEndProc();
++  if(!shouldEmitCFI)
++    return;
++  InFlightCFIs.push_back(Asm->OutStreamer->popDwarfFrameInfo());
++  InFlightSections.push_back(Asm->CurSection);
+ }
+ 
+ DwarfCFIException::DwarfCFIException(AsmPrinter *A)
+@@ -135,7 +145,9 @@
+ 
+   shouldEmitCFI = MF->getMMI().getContext().getAsmInfo()->usesCFIForEH() &&
+                   (shouldEmitPersonality || shouldEmitMoves);
+-  beginFragment(&*MF->begin(), getExceptionSym);
++
++  if (!MF->isChained())
++    beginFragment(&*MF->begin(), getExceptionSym);
+ }
+ 
+ void DwarfCFIException::beginFragment(const MachineBasicBlock *MBB,
+@@ -145,35 +157,41 @@
+ 
+   Asm->OutStreamer->EmitCFIStartProc(/*IsSimple=*/false);
+ 
+-  // Indicate personality routine, if any.
+-  if (!shouldEmitPersonality)
+-    return;
++  if (shouldEmitPersonality) {
++    auto *F = MBB->getParent()->getFunction();
++    auto *P = dyn_cast<Function>(F->getPersonalityFn()->stripPointerCasts());
++    assert(P && "Expected personality function");
+ 
+-  auto *F = MBB->getParent()->getFunction();
+-  auto *P = dyn_cast<Function>(F->getPersonalityFn()->stripPointerCasts());
+-  assert(P && "Expected personality function");
++    // If we are forced to emit this personality, make sure to record
++    // it because it might not appear in any landingpad 
++    if (forceEmitPersonality)
++      MMI->addPersonality(P);
++ 
++    const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
++    unsigned PerEncoding = TLOF.getPersonalityEncoding();
++    const MCSymbol *Sym = TLOF.getCFIPersonalitySymbol(P, *Asm->Mang, Asm->TM, MMI);
++    Asm->OutStreamer->EmitCFIPersonality(Sym, PerEncoding);
+ 
+-  // If we are forced to emit this personality, make sure to record
+-  // it because it might not appear in any landingpad
+-  if (forceEmitPersonality)
+-    MMI->addPersonality(P);
++    // Provide LSDA information.
++    if (shouldEmitLSDA){
++      MCSymbol *Sym = Asm->MBBExceptionLabels[MBB] = ESP(Asm); 
++      Asm->OutStreamer->EmitCFILsda(Sym, TLOF.getLSDAEncoding());
++    }
++  }
+ 
+-  const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
+-  unsigned PerEncoding = TLOF.getPersonalityEncoding();
+-  const MCSymbol *Sym =
+-      TLOF.getCFIPersonalitySymbol(P, *Asm->Mang, Asm->TM, MMI);
+-  Asm->OutStreamer->EmitCFIPersonality(Sym, PerEncoding);
+-
+-  // Provide LSDA information.
+-  if (shouldEmitLSDA)
+-    Asm->OutStreamer->EmitCFILsda(ESP(Asm), TLOF.getLSDAEncoding());
++  if (!InFlightCFIs.empty())
++    for (const MachineInstr *I : InFlightCFIs.back().CFIMachineInstrs)
++      Asm->emitCFIInstruction(*I);
+ }
+ 
+ /// endFunction - Gather and emit post-function exception information.
+ ///
+-void DwarfCFIException::endFunction(const MachineFunction *) {
++void DwarfCFIException::endFunction(const MachineFunction * MF) {
+   if (!shouldEmitPersonality)
+     return;
+-
+-  emitExceptionTable();
++  
++  if (MF->isChained())
++    emitChainedExceptionTable();
++  else
++    emitExceptionTable();
+ }
+Index: lib/CodeGen/AsmPrinter/DwarfException.h
+===================================================================
+--- lib/CodeGen/AsmPrinter/DwarfException.h	(revision 301135)
++++ lib/CodeGen/AsmPrinter/DwarfException.h	(working copy)
+@@ -29,7 +29,12 @@
+   /// Per-function flag to indicate if frame CFI info should be emitted.
+   bool shouldEmitCFI;
+ 
+-  void markFunctionEnd() override;
++  void markFunctionEnd(const MachineFunction*) override;
++
++  /// code stitcher
++  SmallVector<MCDwarfFrameInfo, 6> InFlightCFIs;
++  SmallVector<MCSection*, 6> InFlightSections;
++
+   void endFragment() override;
+ };
+ 
+Index: lib/CodeGen/AsmPrinter/EHStreamer.cpp
+===================================================================
+--- lib/CodeGen/AsmPrinter/EHStreamer.cpp	(revision 301135)
++++ lib/CodeGen/AsmPrinter/EHStreamer.cpp	(working copy)
+@@ -205,6 +205,156 @@
+   }
+ }
+ 
++/// code stitcher
++void EHStreamer::
++computeCallSiteRangeTable(SmallVectorImpl<CallSiteRange> &CallSiteRanges,
++                     const SmallVectorImpl<const LandingPadInfo *> &LandingPads,
++                     const SmallVectorImpl<unsigned> &FirstActions) {
++  RangeMapType PadMap;
++  computePadMap(LandingPads, PadMap);
++
++  // The end label of the previous invoke or nounwind try-range.
++  MCSymbol *LastLabel = nullptr;
++
++  // code stitcher: current function part begin symbol
++  MCSymbol *FuncPartBeginLabel = nullptr;
++
++  // code stitcher: current call site range index
++	CallSiteRange *CurCSRange = nullptr;
++
++  // Whether there is a potentially throwing instruction (currently this means
++  // an ordinary call) between the end of the previous try-range and now.
++  bool SawPotentiallyThrowing = false;
++
++  // Whether the last CallSite entry was for an invoke.
++  bool PreviousIsInvoke = false;
++
++  bool IsSJLJ = Asm->MAI->getExceptionHandlingType() == ExceptionHandling::SjLj;
++	
++  // Visit all instructions in order of address.
++
++  CallSiteRange * LandingPadRange = nullptr;
++  
++  for (const auto &MBB : *Asm->MF) {
++
++		if(MBB.isChainHead()){
++			CallSiteRanges.push_back(CallSiteRange());
++			CurCSRange = &CallSiteRanges.back();
++			CurCSRange->FuncPartBeginLabel = FuncPartBeginLabel = Asm->getMBBBeginLabel(&MBB);
++			CurCSRange->ExceptionLabel = Asm->getMBBExceptionLabel(&MBB);
++  		PreviousIsInvoke = false;
++  		SawPotentiallyThrowing = false;
++			LastLabel = nullptr;
++ 								
++		}
++
++		if(MBB.isEHPad()){
++			if(LandingPadRange==nullptr){
++       	CurCSRange->HasLandingPads = true;
++				LandingPadRange = CurCSRange;
++			}else
++				assert(LandingPadRange->FuncPartBeginLabel==CurCSRange->FuncPartBeginLabel && "landing pad range is not this callsite range");
++		}
++
++
++    for (const auto &MI : MBB) {
++      if (!MI.isEHLabel()) {
++        if (MI.isCall())
++          SawPotentiallyThrowing |= !callToNoUnwindFunction(&MI);
++        continue;
++      }
++
++      // End of the previous try-range?
++      MCSymbol *BeginLabel = MI.getOperand(0).getMCSymbol();
++      if (BeginLabel == LastLabel)
++        SawPotentiallyThrowing = false;
++
++      // Beginning of a new try-range?
++      RangeMapType::const_iterator L = PadMap.find(BeginLabel);
++      if (L == PadMap.end())
++        // Nope, it was just some random label.
++        continue;
++
++      const PadRange &P = L->second;
++      const LandingPadInfo *LandingPad = LandingPads[P.PadIndex];
++      assert(BeginLabel == LandingPad->BeginLabels[P.RangeIndex] &&
++             "Inconsistent landing pad map!");
++
++      // For Dwarf exception handling (SjLj handling doesn't use this). If some
++      // instruction between the previous try-range and this one may throw,
++      // create a call-site entry with no landing pad for the region between the
++      // try-ranges.
++      if (SawPotentiallyThrowing && Asm->MAI->usesCFIForEH()) {
++        CallSiteEntry Site = { LastLabel, BeginLabel, nullptr, 0 };
++        CurCSRange->CallSites.push_back(Site);
++        PreviousIsInvoke = false;
++      }
++
++      LastLabel = LandingPad->EndLabels[P.RangeIndex];
++      assert(BeginLabel && LastLabel && "Invalid landing pad!");
++
++      if (!LandingPad->LandingPadLabel) {
++        // Create a gap.
++        PreviousIsInvoke = false;
++      } else {
++        // This try-range is for an invoke.
++        CallSiteEntry Site = {
++          BeginLabel,
++          LastLabel,
++          LandingPad,
++          FirstActions[P.PadIndex]
++        };
++
++        // Try to merge with the previous call-site. SJLJ doesn't do this
++        if (PreviousIsInvoke && !IsSJLJ) {
++          CallSiteEntry &Prev = CurCSRange->CallSites.back();
++          if (Site.LPad == Prev.LPad && Site.Action == Prev.Action) {
++            // Extend the range of the previous entry.
++            Prev.EndLabel = Site.EndLabel;
++            continue;
++          }
++        }
++
++        // Otherwise, create a new call-site.
++        if (!IsSJLJ){
++          CurCSRange->CallSites.push_back(Site);
++        }else {
++          // SjLj EH must maintain the call sites in the order assigned
++          // to them by the SjLjPrepare pass.
++          unsigned SiteNo = MMI->getCallSiteBeginLabel(BeginLabel);
++          if (CurCSRange->CallSites.size() < SiteNo)
++            CurCSRange->CallSites.resize(SiteNo);
++          CurCSRange->CallSites[SiteNo - 1] = Site;
++        }
++        PreviousIsInvoke = true;
++      }
++    }
++
++		/// code stitcher
++    if(MBB.isChainTail()){
++			MCSymbol * FuncPartEndLabel = Asm->getMBBEndLabel(&MBB);
++			if(CurCSRange!=nullptr){
++				CurCSRange->FuncPartEndLabel = FuncPartEndLabel;
++				if(SawPotentiallyThrowing && !IsSJLJ && 
++					 LastLabel!=FuncPartBeginLabel){
++							CallSiteEntry Site = {LastLabel, FuncPartEndLabel, nullptr, 0};
++							CurCSRange->CallSites.push_back(Site);
++							SawPotentiallyThrowing = false;
++				}
++				CurCSRange = nullptr;
++			}
++		}
++  }
++
++  // function may throw, create a call-site entry with no landing pad for the
++  // region following the try-range.
++  if (SawPotentiallyThrowing && !IsSJLJ && LastLabel != nullptr && CurCSRange!=nullptr) {
++    CallSiteEntry Site = { LastLabel, nullptr, nullptr, 0 };
++    CurCSRange->CallSites.push_back(Site);
++  }
++
++}
++
+ /// Compute the call-site table.  The entry for an invoke has a try-range
+ /// containing the call, a non-zero landing pad, and an appropriate action.  The
+ /// entry for an ordinary call has a try-range containing the call and zero for
+@@ -229,6 +379,7 @@
+   bool PreviousIsInvoke = false;
+ 
+   bool IsSJLJ = Asm->MAI->getExceptionHandlingType() == ExceptionHandling::SjLj;
++	
+ 
+   // Visit all instructions in order of address.
+   for (const auto &MBB : *Asm->MF) {
+@@ -315,6 +466,338 @@
+   }
+ }
+ 
++//code stitcher
++void EHStreamer::emitChainedExceptionTable() {
++  const std::vector<const GlobalValue *> &TypeInfos = MMI->getTypeInfos();
++  const std::vector<unsigned> &FilterIds = MMI->getFilterIds();
++  const std::vector<LandingPadInfo> &PadInfos = MMI->getLandingPads();
++
++  // Sort the landing pads in order of their type ids.  This is used to fold
++  // duplicate actions.
++  SmallVector<const LandingPadInfo *, 64> LandingPads;
++  LandingPads.reserve(PadInfos.size());
++
++  for (unsigned i = 0, N = PadInfos.size(); i != N; ++i)
++    LandingPads.push_back(&PadInfos[i]);
++
++  // Order landing pads lexicographically by type id.
++  std::sort(LandingPads.begin(), LandingPads.end(),
++            [](const LandingPadInfo *L,
++               const LandingPadInfo *R) { return L->TypeIds < R->TypeIds; });
++
++  // Compute the actions table and gather the first action index for each
++  // landing pad site.
++  SmallVector<ActionEntry, 32> Actions;
++  SmallVector<unsigned, 64> FirstActions;
++  unsigned SizeActions =
++    computeActionsTable(LandingPads, Actions, FirstActions);
++
++
++  // Compute the call-site table.
++  //SmallVector<CallSiteEntry, 64> CallSites;
++  /// codestitcher
++  SmallVector<CallSiteRange, 6> CallSiteRanges;
++  //computeCallSiteTable(CallSites, LandingPads, FirstActions);
++  /// codestitcher
++  computeCallSiteRangeTable(CallSiteRanges, LandingPads, FirstActions);
++
++  // Final tallies.
++
++  // Call sites.
++  bool IsSJLJ = Asm->MAI->getExceptionHandlingType() == ExceptionHandling::SjLj;
++  bool HaveTTData = IsSJLJ ? (!TypeInfos.empty() || !FilterIds.empty()) : true;
++
++  // Type infos.
++  MCSection *LSDASection = Asm->getObjFileLowering().getLSDASection();
++
++  unsigned TTypeEncoding;
++  unsigned TypeFormatSize;
++
++  if (!HaveTTData) {
++    // For SjLj exceptions, if there is no TypeInfo, then we just explicitly say
++    // that we're omitting that bit.
++    TTypeEncoding = dwarf::DW_EH_PE_omit;
++    // dwarf::DW_EH_PE_absptr
++    TypeFormatSize = Asm->getDataLayout().getPointerSize();
++  } else {
++    // Okay, we have actual filters or typeinfos to emit.  As such, we need to
++    // pick a type encoding for them.  We're about to emit a list of pointers to
++    // typeinfo objects at the end of the LSDA.  However, unless we're in static
++    // mode, this reference will require a relocation by the dynamic linker.
++    //
++    // Because of this, we have a couple of options:
++    //
++    //   1) If we are in -static mode, we can always use an absolute reference
++    //      from the LSDA, because the static linker will resolve it.
++    //
++    //   2) Otherwise, if the LSDA section is writable, we can output the direct
++    //      reference to the typeinfo and allow the dynamic linker to relocate
++    //      it.  Since it is in a writable section, the dynamic linker won't
++    //      have a problem.
++    //
++    //   3) Finally, if we're in PIC mode and the LDSA section isn't writable,
++    //      we need to use some form of indirection.  For example, on Darwin,
++    //      we can output a statically-relocatable reference to a dyld stub. The
++    //      offset to the stub is constant, but the contents are in a section
++    //      that is updated by the dynamic linker.  This is easy enough, but we
++    //      need to tell the personality function of the unwinder to indirect
++    //      through the dyld stub.
++    //
++    // FIXME: When (3) is actually implemented, we'll have to emit the stubs
++    // somewhere.  This predicate should be moved to a shared location that is
++    // in target-independent code.
++    //
++    TTypeEncoding = Asm->getObjFileLowering().getTTypeEncoding();
++    TypeFormatSize = Asm->GetSizeOfEncodedValue(TTypeEncoding);
++  }
++
++  // Begin the exception table.
++  // Sometimes we want not to emit the data into separate section (e.g. ARM
++  // EHABI). In this case LSDASection will be NULL.
++  if (LSDASection)
++    Asm->OutStreamer->SwitchSection(LSDASection);
++  Asm->EmitAlignment(2);
++
++  // Emit the LSDA.
++  MCSymbol *GCCETSym =
++    Asm->OutContext.getOrCreateSymbol(Twine("GCC_except_table")+
++                                      Twine(Asm->getFunctionNumber()));
++  Asm->OutStreamer->EmitLabel(GCCETSym);
++
++  unsigned SizeTypes = TypeInfos.size() * TypeFormatSize;
++  unsigned PrevCSRangeSize = 0;
++
++  for (int i=CallSiteRanges.size()-1; i>=0; --i){
++    auto& CSRange = CallSiteRanges[i];
++    unsigned CallSiteTableLength;
++    unsigned SiteStartSize  = 4; // dwarf::DW_EH_PE_udata4
++    unsigned SiteLengthSize = 4; // dwarf::DW_EH_PE_udata4
++    unsigned LandingPadSize = 4; // dwarf::DW_EH_PE_udata4
++    CallSiteTableLength =
++      CSRange.CallSites.size() * (SiteStartSize + SiteLengthSize + LandingPadSize);
++
++    for (unsigned i = 0, e = CSRange.CallSites.size(); i < e; ++i) 
++      CallSiteTableLength += getULEB128Size(CSRange.CallSites[i].Action);
++
++    unsigned ActionTableIndex = CallSiteTableLength + PrevCSRangeSize;
++
++    unsigned ActionTableIndexHeaderSize =
++      sizeof(int8_t) +                          // Call site format
++      getULEB128Size(ActionTableIndex);   // Call site table length
++
++    unsigned TypeInfoTableIndex = ActionTableIndexHeaderSize + 
++                                  CallSiteTableLength + 
++                                  PrevCSRangeSize + 
++                                  SizeActions +
++                                  SizeTypes;
++
++    unsigned LSDAHeaderSize =
++      sizeof(int8_t) +                          // LPStart format
++      sizeof(int8_t) +                          // TType format
++      Asm->getDataLayout().getPointerSize() + //for LPStart pointer
++      ActionTableIndexHeaderSize;
++
++    LSDAHeaderSize += (HaveTTData ? getULEB128Size(TypeInfoTableIndex) : 0) ;   // TType base offset size
++			
++    // Make sure it is aligned.
++    unsigned totalSize = LSDAHeaderSize + CallSiteTableLength + PrevCSRangeSize + SizeActions+ SizeTypes;
++    CSRange.SizeAlign = ((4 - totalSize) & 3);
++    LSDAHeaderSize += CSRange.SizeAlign;
++    PrevCSRangeSize += LSDAHeaderSize + CallSiteTableLength;
++
++    CSRange.LSDAHeaderSize = LSDAHeaderSize;
++    CSRange.ActionTableIndex = ActionTableIndex;
++    CSRange.TypeInfoTableIndex = TypeInfoTableIndex;
++  }
++			
++  bool VerboseAsm = Asm->OutStreamer->isVerboseAsm();
++
++  CallSiteRange* LandingPadRange = &CallSiteRanges.back();
++
++  for (unsigned i=0; i<CallSiteRanges.size(); ++i){
++    auto& CSRange = CallSiteRanges[i];
++    if (CSRange.HasLandingPads){
++      LandingPadRange = &CSRange;
++      break;
++    }
++  }
++	
++  MCSymbol * PadBaseLabel = LandingPadRange->FuncPartBeginLabel;
++
++  for (unsigned i=0; i<CallSiteRanges.size(); ++i){
++    auto& CSRange = CallSiteRanges[i];
++    Asm->OutStreamer->EmitLabel(CSRange.ExceptionLabel);
++		
++    // Emit the LSDA header.
++    auto PtrSize = Asm->getDataLayout().getPointerSize();
++
++    // If there is a cold fragment, landing pads are in there.
++    Asm->EmitEncodingByte(dwarf::DW_EH_PE_absptr, "@LPStart");
++    Asm->OutStreamer->EmitSymbolValue(PadBaseLabel, PtrSize);
++	
++    Asm->EmitEncodingByte(TTypeEncoding, "@TType");
++
++    if (HaveTTData) {
++      // Account for any extra padding that will be added to the call site table
++      // length.
++      Asm->EmitULEB128(CSRange.TypeInfoTableIndex, 
++                       "@TType base offset", 
++                       CSRange.SizeAlign);
++      CSRange.SizeAlign = 0;
++    }
++
++    // Emit the landing pad call site table.
++    Asm->EmitEncodingByte(dwarf::DW_EH_PE_udata4, "Call site");
++
++    // Add extra padding if it wasn't added to the TType base offset.
++    Asm->EmitULEB128(CSRange.ActionTableIndex, "Call site table length", CSRange.SizeAlign);
++
++    unsigned Entry = 0;
++    for (SmallVectorImpl<CallSiteEntry>::const_iterator
++      I = CSRange.CallSites.begin(), E = CSRange.CallSites.end(); I != E; ++I) {
++      const CallSiteEntry &S = *I;
++
++      MCSymbol *EHFuncBeginSym = CSRange.FuncPartBeginLabel;
++      MCSymbol *EHFuncEndSym = CSRange.FuncPartEndLabel;
++
++      MCSymbol *BeginLabel = S.BeginLabel;
++      if (!BeginLabel)
++        BeginLabel = EHFuncBeginSym;
++      MCSymbol *EndLabel = S.EndLabel;
++      if (!EndLabel)
++        EndLabel = EHFuncEndSym;
++
++      // Offset of the call site relative to the previous call site, counted in
++      // number of 16-byte bundles. The first call site is counted relative to
++      // the start of the procedure fragment.
++      if (VerboseAsm)
++        Asm->OutStreamer->AddComment(">> Call Site " + Twine(++Entry) + " <<");
++      Asm->EmitLabelDifference(BeginLabel, EHFuncBeginSym, 4);
++      if (VerboseAsm)
++        Asm->OutStreamer->AddComment(Twine("  Call between ") +
++                                     BeginLabel->getName() + " and " +
++                                     EndLabel->getName());
++      Asm->EmitLabelDifference(EndLabel, BeginLabel, 4);
++
++      // Offset of the landing pad, counted in 16-byte bundles relative to the
++      // @LPStart address.
++      if (!S.LPad) {
++        if (VerboseAsm)
++          Asm->OutStreamer->AddComment("    has no landing pad");
++        Asm->OutStreamer->EmitIntValue(0, 4/*size*/);
++      } else {
++        if (VerboseAsm)
++          Asm->OutStreamer->AddComment(Twine("    jumps to ") +
++                                       S.LPad->LandingPadLabel->getName());
++        //errs() << "landing pad difference begin\t" << S.LPad->LandingPadLabel->getName() << "\n";
++        Asm->EmitLabelDifference(S.LPad->LandingPadLabel, PadBaseLabel, 4);
++        //errs() << "landing pad difference done\n";
++      }
++		
++      // Offset of the first associated action record, relative to the start of
++      // the action table. This value is biased by 1 (1 indicates the start of
++      // the action table), and 0 indicates that there are no actions.
++      if (VerboseAsm) {
++        if (S.Action == 0){
++          Asm->OutStreamer->AddComment("  On action: cleanup");
++        }else{
++          Asm->OutStreamer->AddComment("  On action: " +
++                                       Twine((S.Action - 1) / 2 + 1));
++        }
++      }
++      Asm->EmitULEB128(S.Action);
++    }
++  }
++
++  // Emit the Action Table.
++  int Entry = 0;
++  for (SmallVectorImpl<ActionEntry>::const_iterator
++         I = Actions.begin(), E = Actions.end(); I != E; ++I) {
++    const ActionEntry &Action = *I;
++
++    if (VerboseAsm) {
++      // Emit comments that decode the action table.
++      Asm->OutStreamer->AddComment(">> Action Record " + Twine(++Entry) + " <<");
++    }
++
++    // Type Filter
++    //
++    //   Used by the runtime to match the type of the thrown exception to the
++    //   type of the catch clauses or the types in the exception specification.
++    if (VerboseAsm) {
++      if (Action.ValueForTypeID > 0)
++        Asm->OutStreamer->AddComment("  Catch TypeInfo " +
++                                     Twine(Action.ValueForTypeID));
++      else if (Action.ValueForTypeID < 0)
++        Asm->OutStreamer->AddComment("  Filter TypeInfo " +
++                                     Twine(Action.ValueForTypeID));
++      else
++        Asm->OutStreamer->AddComment("  Cleanup");
++    }
++    Asm->EmitSLEB128(Action.ValueForTypeID);
++
++    // Action Record
++    //
++    //   Self-relative signed displacement in bytes of the next action record,
++    //   or 0 if there is no next action record.
++    if (VerboseAsm) {
++      if (Action.NextAction == 0) {
++        Asm->OutStreamer->AddComment("  No further actions");
++      } else {
++        unsigned NextAction = Entry + (Action.NextAction + 1) / 2;
++        Asm->OutStreamer->AddComment("  Continue to action "+Twine(NextAction));
++      }
++    }
++    Asm->EmitSLEB128(Action.NextAction);
++  }
++
++  emitTypeInfos(TTypeEncoding);
++
++  Asm->EmitAlignment(2);
++}
++
++void EHStreamer::emitTypeInfos(unsigned TTypeEncoding) {
++  const std::vector<const GlobalValue *> &TypeInfos = MMI->getTypeInfos();
++  const std::vector<unsigned> &FilterIds = MMI->getFilterIds();
++
++  bool VerboseAsm = Asm->OutStreamer->isVerboseAsm();
++
++  int Entry = 0;
++  // Emit the Catch TypeInfos.
++  if (VerboseAsm && !TypeInfos.empty()) {
++    Asm->OutStreamer->AddComment(">> Catch TypeInfos <<");
++    Asm->OutStreamer->AddBlankLine();
++    Entry = TypeInfos.size();
++  }
++
++  for (const GlobalValue *GV : make_range(TypeInfos.rbegin(),
++                                          TypeInfos.rend())) {
++    if (VerboseAsm)
++      Asm->OutStreamer->AddComment("TypeInfo " + Twine(Entry--));
++    Asm->EmitTTypeReference(GV, TTypeEncoding);
++  }
++
++  // Emit the Exception Specifications.
++  if (VerboseAsm && !FilterIds.empty()) {
++    Asm->OutStreamer->AddComment(">> Filter TypeInfos <<");
++    Asm->OutStreamer->AddBlankLine();
++    Entry = 0;
++  }
++  for (std::vector<unsigned>::const_iterator
++         I = FilterIds.begin(), E = FilterIds.end(); I < E; ++I) {
++    unsigned TypeID = *I;
++    if (VerboseAsm) {
++      --Entry;
++      if (isFilterEHSelector(TypeID))
++        Asm->OutStreamer->AddComment("FilterInfo " + Twine(Entry));
++    }
++
++    Asm->EmitULEB128(TypeID);
++  }
++}
++
++
++
+ /// Emit landing pads and actions.
+ ///
+ /// The general organization of the table is complex, but the basic concepts are
+@@ -647,43 +1130,3 @@
+ 
+   Asm->EmitAlignment(2);
+ }
+-
+-void EHStreamer::emitTypeInfos(unsigned TTypeEncoding) {
+-  const std::vector<const GlobalValue *> &TypeInfos = MMI->getTypeInfos();
+-  const std::vector<unsigned> &FilterIds = MMI->getFilterIds();
+-
+-  bool VerboseAsm = Asm->OutStreamer->isVerboseAsm();
+-
+-  int Entry = 0;
+-  // Emit the Catch TypeInfos.
+-  if (VerboseAsm && !TypeInfos.empty()) {
+-    Asm->OutStreamer->AddComment(">> Catch TypeInfos <<");
+-    Asm->OutStreamer->AddBlankLine();
+-    Entry = TypeInfos.size();
+-  }
+-
+-  for (const GlobalValue *GV : make_range(TypeInfos.rbegin(),
+-                                          TypeInfos.rend())) {
+-    if (VerboseAsm)
+-      Asm->OutStreamer->AddComment("TypeInfo " + Twine(Entry--));
+-    Asm->EmitTTypeReference(GV, TTypeEncoding);
+-  }
+-
+-  // Emit the Exception Specifications.
+-  if (VerboseAsm && !FilterIds.empty()) {
+-    Asm->OutStreamer->AddComment(">> Filter TypeInfos <<");
+-    Asm->OutStreamer->AddBlankLine();
+-    Entry = 0;
+-  }
+-  for (std::vector<unsigned>::const_iterator
+-         I = FilterIds.begin(), E = FilterIds.end(); I < E; ++I) {
+-    unsigned TypeID = *I;
+-    if (VerboseAsm) {
+-      --Entry;
+-      if (isFilterEHSelector(TypeID))
+-        Asm->OutStreamer->AddComment("FilterInfo " + Twine(Entry));
+-    }
+-
+-    Asm->EmitULEB128(TypeID);
+-  }
+-}
+Index: lib/CodeGen/AsmPrinter/EHStreamer.h
+===================================================================
+--- lib/CodeGen/AsmPrinter/EHStreamer.h	(revision 301135)
++++ lib/CodeGen/AsmPrinter/EHStreamer.h	(working copy)
+@@ -69,6 +69,20 @@
+     unsigned Action;
+   };
+ 
++	struct CallSiteRange {
++		SmallVector<CallSiteEntry, 64> CallSites;
++  	MCSymbol *FuncPartBeginLabel = nullptr;
++  	MCSymbol *FuncPartEndLabel = nullptr;
++		MCSymbol *ExceptionLabel = nullptr;
++		unsigned LSDAHeaderSize = 0;
++		unsigned ActionTableIndex = 0;
++		unsigned SizeAlign = 0;
++		unsigned TypeInfoTableIndex = 0;
++    bool HasLandingPads = false;
++		
++				CallSiteRange(){}
++	};
++
+   /// Compute the actions table and gather the first action index for each
+   /// landing pad site.
+   unsigned computeActionsTable(const SmallVectorImpl<const LandingPadInfo*>&LPs,
+@@ -88,6 +102,11 @@
+                             const SmallVectorImpl<const LandingPadInfo *> &LPs,
+                             const SmallVectorImpl<unsigned> &FirstActions);
+ 
++	/// code stitcher;
++  void computeCallSiteRangeTable(SmallVectorImpl<CallSiteRange> &CallSiteRanges,
++                     const SmallVectorImpl<const LandingPadInfo *> &LandingPads,
++                     const SmallVectorImpl<unsigned> &FirstActions);
++
+   /// Emit landing pads and actions.
+   ///
+   /// The general organization of the table is complex, but the basic concepts
+@@ -109,6 +128,9 @@
+   ///     catches in the function.  This tables is reversed indexed base 1.
+   void emitExceptionTable();
+ 
++	/// code stitcher
++  void emitChainedExceptionTable();
++
+   virtual void emitTypeInfos(unsigned TTypeEncoding);
+ 
+   // Helpers for for identifying what kind of clause an EH typeid or selector
+Index: lib/CodeGen/BBLayoutInput.cpp
+===================================================================
+--- lib/CodeGen/BBLayoutInput.cpp	(nonexistent)
++++ lib/CodeGen/BBLayoutInput.cpp	(working copy)
+@@ -0,0 +1,18 @@
++#include "llvm/CodeGen/BBLayoutInput.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/Support/Debug.h"
++
++#define DEBUG_TYPE "block-layout"
++
++namespace llvm{
++  ImmutablePass* createBBLayoutInputPass(StringRef BBLayoutFilePath, bool RemoveTailCalls) {
++    return new BBLayoutInput(BBLayoutFilePath,RemoveTailCalls);
++  }
++}
++
++char llvm::BBLayoutInput::ID = 0;
++
++INITIALIZE_PASS_BEGIN(BBLayoutInput, "bb-layout-input",
++                      "Code Stitcher's BB Layout Input Analysis", false, true)
++INITIALIZE_PASS_END(BBLayoutInput, "bb-layout-input",
++                    "Code Stitcher's BB Layout Input Analysis", false, true)
+Index: lib/CodeGen/CMakeLists.txt
+===================================================================
+--- lib/CodeGen/CMakeLists.txt	(revision 301135)
++++ lib/CodeGen/CMakeLists.txt	(working copy)
+@@ -4,6 +4,8 @@
+   Analysis.cpp
+   AtomicExpandPass.cpp
+   BasicTargetTransformInfo.cpp
++  BBLayoutInput.cpp #codestitcher
++  FunctionLayoutInput.cpp #codestitcher
+   BranchFolding.cpp
+   BuiltinGCs.cpp
+   CalcSpillWeights.cpp
+@@ -10,6 +12,7 @@
+   CallingConvLower.cpp
+   CodeGen.cpp
+   CodeGenPrepare.cpp
++  CodeLayoutTracing.cpp #codestitcher
+   CriticalAntiDepBreaker.cpp
+   DeadMachineInstructionElim.cpp
+   DetectDeadLanes.cpp
+@@ -52,6 +55,7 @@
+   MachineBasicBlock.cpp
+   MachineBlockFrequencyInfo.cpp
+   MachineBlockPlacement.cpp
++  MachineBlockLayout.cpp  #code stitcher
+   MachineBranchProbabilityInfo.cpp
+   MachineCombiner.cpp
+   MachineCopyPropagation.cpp
+@@ -77,6 +81,7 @@
+   MachineSSAUpdater.cpp
+   MachineTraceMetrics.cpp
+   MachineVerifier.cpp
++  MBBRenumbering.cpp #codestitcher
+   PatchableFunction.cpp
+   MIRPrinter.cpp
+   MIRPrintingPass.cpp
+Index: lib/CodeGen/CodeLayoutTracing.cpp
+===================================================================
+--- lib/CodeGen/CodeLayoutTracing.cpp	(nonexistent)
++++ lib/CodeGen/CodeLayoutTracing.cpp	(working copy)
+@@ -0,0 +1,66 @@
++#include "llvm/Pass.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Support/raw_ostream.h"
++//#include "llvm/Transforms/Utils/BasicBlockUtils.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/Transforms/Instrumentation.h"
++//#include "llvm/IR/CallSite.h"
++//#include "llvm/Transforms/Utils/Cloning.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/Transforms/Utils/ModuleUtils.h"
++using namespace llvm;
++
++namespace llvm {
++
++  class RemapInHugePages : public ModulePass {
++  public:
++    static char ID;
++    RemapInHugePages(): ModulePass(ID)  {}
++    virtual const char * getPassName() const{
++      return "Remap text in huge pages";
++    }
++
++    bool runOnModule(Module &M) {
++      LLVMContext &context = M.getContext();
++      IRBuilder<> IRB(context);
++      Function * InitFn = Function::Create(FunctionType::get(IRB.getVoidTy(), false), GlobalValue::InternalLinkage, "__huge_page_init", &M);
++      BasicBlock * InitEntry = BasicBlock::Create(context, "entry", InitFn);
++      IRB.SetInsertPoint(InitEntry);
++
++      {
++        Type *Int8PtrTy = IRB.getInt8PtrTy();
++        Value* hot_text_begin = IRB.CreatePointerCast(
++                                    cast<GlobalVariable>(M.getOrInsertGlobal("_hot_text_begin",Int8PtrTy)),Int8PtrTy);
++        Value* hot_text_end = IRB.CreatePointerCast(
++                                    cast<GlobalVariable>(M.getOrInsertGlobal("_hot_text_end",Int8PtrTy)),Int8PtrTy);
++        Value* text_begin = IRB.CreatePointerCast(
++                                    cast<GlobalVariable>(M.getOrInsertGlobal("_text_begin",Int8PtrTy)),Int8PtrTy);
++        Value* text_end = IRB.CreatePointerCast(cast<GlobalVariable>(M.getOrInsertGlobal("_text_end",Int8PtrTy)),Int8PtrTy);
++        SmallVector<Value *,4> Args;
++        Args.push_back(hot_text_begin);
++        Args.push_back(hot_text_end);
++        Args.push_back(text_begin);
++        Args.push_back(text_end);
++
++        SmallVector<Type *, 4> ArgTys;
++        for (Value *Arg : Args)
++          ArgTys.push_back(Arg->getType());
++
++        Constant *remapFn = M.getOrInsertFunction("RemapToHugePages", FunctionType::get(IRB.getVoidTy(), ArgTys,false));
++        IRB.CreateCall(remapFn,Args);
++      }
++			
++      IRB.CreateRetVoid();
++      appendToGlobalCtors(M,InitFn,0);
++      return true;
++    }
++  };
++}
++
++char RemapInHugePages::ID = 0;
++
++ModulePass *llvm::createRemapInHugePagesPass(){
++  return new RemapInHugePages();
++}
+Index: lib/CodeGen/FunctionLayoutInput.cpp
+===================================================================
+--- lib/CodeGen/FunctionLayoutInput.cpp	(nonexistent)
++++ lib/CodeGen/FunctionLayoutInput.cpp	(working copy)
+@@ -0,0 +1,19 @@
++#include "llvm/CodeGen/FunctionLayoutInput.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/Support/Debug.h"
++
++#define DEBUG_TYPE "block-layout"
++
++namespace llvm{
++  ImmutablePass* createFunctionLayoutInputPass(StringRef FunctionLayoutFilePath) {
++    return new FunctionLayoutInput(FunctionLayoutFilePath);
++  }
++}
++
++char llvm::FunctionLayoutInput::ID = 0;
++
++INITIALIZE_PASS_BEGIN(FunctionLayoutInput, "func-layout-input",
++                      "Code Stitcher's Function Layout Input Analysis", false, true)
++INITIALIZE_PASS_END(FunctionLayoutInput, "func-layout-input",
++                    "Code Stitcher's Function Layout Input Analysis", false, true)
++
+Index: lib/CodeGen/LLVMTargetMachine.cpp
+===================================================================
+--- lib/CodeGen/LLVMTargetMachine.cpp	(revision 301135)
++++ lib/CodeGen/LLVMTargetMachine.cpp	(working copy)
+@@ -47,6 +47,10 @@
+     EnableGlobalISel("global-isel", cl::Hidden, cl::init(false),
+                      cl::desc("Enable the \"global\" instruction selector"));
+ 
++static cl::opt<bool>
++    EnableEmitBBSymbols("emit-bb-symbols", cl::Hidden, cl::init(false),
++                        cl::desc("Emit BB Symbols"));
++
+ void LLVMTargetMachine::initAsmInfo() {
+   MRI = TheTarget.createMCRegInfo(getTargetTriple().str());
+   MII = TheTarget.createMCInstrInfo();
+@@ -254,6 +258,9 @@
+     break;
+   }
+ 
++  if(EnableEmitBBSymbols)
++    AsmStreamer->setShouldEmitBBSymbols(true);
++
+   // Create the AsmPrinter, which takes ownership of AsmStreamer if successful.
+   FunctionPass *Printer =
+       getTarget().createAsmPrinter(*this, std::move(AsmStreamer));
+Index: lib/CodeGen/MBBRenumbering.cpp
+===================================================================
+--- lib/CodeGen/MBBRenumbering.cpp	(nonexistent)
++++ lib/CodeGen/MBBRenumbering.cpp	(working copy)
+@@ -0,0 +1,38 @@
++#include "llvm/Pass.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineFunction.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/IR/Function.h"
++
++using namespace llvm;
++
++namespace {
++  class MBBRenumbering : public MachineFunctionPass {
++    bool runOnMachineFunction(MachineFunction &MF);
++  public:
++    static char ID;
++
++    MBBRenumbering(): MachineFunctionPass(ID){
++      initializeMBBRenumberingPass(*PassRegistry::getPassRegistry());
++    }
++
++    virtual const char * getPassName() const{
++      return "Renumbers the basic blocks of each function.";
++    }
++  };
++}
++
++char MBBRenumbering::ID = 0;
++INITIALIZE_PASS (MBBRenumbering,"mbb-renumbering","renumbers basic blocks of each function.",false,false)
++
++MachineFunctionPass *llvm::createMBBRenumberingPass(){
++  return new MBBRenumbering();
++}
++
++bool MBBRenumbering::runOnMachineFunction(MachineFunction &MF){
++  MF.RenumberBlocks();
++  return false;
++}
++ 
+Index: lib/CodeGen/MachineBasicBlock.cpp
+===================================================================
+--- lib/CodeGen/MachineBasicBlock.cpp	(revision 301135)
++++ lib/CodeGen/MachineBasicBlock.cpp	(working copy)
+@@ -33,6 +33,7 @@
+ #include "llvm/Target/TargetMachine.h"
+ #include "llvm/Target/TargetRegisterInfo.h"
+ #include "llvm/Target/TargetSubtargetInfo.h"
++#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
+ #include <algorithm>
+ using namespace llvm;
+ 
+@@ -218,7 +219,99 @@
+     return "(null)";
+ }
+ 
++std::string MachineBasicBlock::getBBName() const {
++  std::string Name="";
++  if (getParent())
++    Name += (getParent()->getName() + "_").str();
++  Name += ("BB_" + Twine(getNumber())).str();
++  return Name;
++}
++
++
++
+ /// Return a hopefully unique identifier for this block.
++std::string MachineBasicBlock::getFullBBName(const Pass *P) const {
++  MachineBasicBlock *TBB = nullptr, *FBB = nullptr;
++  SmallVector<MachineOperand, 4> Cond;
++  const TargetInstrInfo &TII = *getParent()->getSubtarget().getInstrInfo();
++  const MachineBlockFrequencyInfo *MBFI = P->getAnalysisIfAvailable<MachineBlockFrequencyInfo>();
++  MachineBasicBlock* MBB = const_cast<MachineBasicBlock*>(this);
++  bool B = TII.analyzeBranch(*MBB, TBB, FBB, Cond);
++
++  std::string Name;
++  raw_string_ostream os(Name);
++  if (getParent())
++    os <<  getParent()->getName();
++  os << "*";
++  os << Twine(getNumber());
++  if (getNumber()==0){
++    os << "-";
++    auto ec = MBB->getParent()->getFunction()->getEntryCount();
++    if (ec==None)
++      os << "0";
++    else
++      os << ec.getValue();
++  }
++  os << "-";
++  if (MBFI){
++    os << Twine(MBFI->getBlockFreq(MBB).getFrequency());
++  } else
++    os <<  0;
++  os << "-{";
++
++  for (const_succ_iterator SI = succ_begin(), E = succ_end(); SI != E; ++SI) {
++    if(SI!=succ_begin())
++      os << ",";
++    os << "\"" << Twine((*SI)->getNumber()) << "\":{";
++    if (!Probs.empty())
++      os << *getProbabilityIterator(SI);
++    if (!B && !Cond.empty()){
++      if (!Probs.empty() && !getProbabilityIterator(SI)->isUnknown())
++        os << ",";
++      if (*SI==TBB)
++        os << "\"type\":\"T\"";
++      else
++        os << "\"type\":\"F\"";
++    }
++    os << "}";
++  }
++	
++  MachineBasicBlock::const_iterator last_mir =  getLastNonDebugInstr();
++  if (last_mir!=end() && last_mir->isCall() && last_mir->isTerminator()){
++    const MachineOperand& op = last_mir->getOperand(0);
++    if (op.isGlobal()){
++      const StringRef& name = op.getGlobal()->getName();
++      Function * callee =  getParent()->getFunction()->getParent()->getFunction(name);
++      if (callee!=NULL)
++        os <<  "\"" << callee->getName() << "\":{}";
++    }
++  }else if(tailRemoved){
++    os << "\"" << tailFunction << "\":{}";
++  }
++  os << "}*[";	
++  bool first = true;	
++  for (MachineBasicBlock::const_iterator I=begin(), IE=end(); I!=IE; ++I)
++    if(I->isCall()){
++      const MachineOperand& op = I->getOperand(0);
++      if (op.isGlobal()){
++        const StringRef& name = op.getGlobal()->getName();
++        Function * callee =  getParent()->getFunction()->getParent()->getFunction(name);
++        if (callee!=NULL){
++          if (!first)
++            os << ",";
++          os <<  "\"" << callee->getName() << "\"";
++          first = false;
++        }
++      }
++    }
++
++  os << "]";
++  if(isEHPad())
++    os << "*LP";
++  return Name;
++}
++
++/// Return a hopefully unique identifier for this block.
+ std::string MachineBasicBlock::getFullName() const {
+   std::string Name;
+   if (getParent())
+@@ -455,7 +548,7 @@
+     } else if (isLayoutSuccessor(FBB)) {
+       TII->RemoveBranch(*this);
+       TII->InsertBranch(*this, TBB, nullptr, Cond, DL);
+-    }
++    } 
+     return;
+   }
+ 
+@@ -669,6 +762,8 @@
+ }
+ 
+ bool MachineBasicBlock::isLayoutSuccessor(const MachineBasicBlock *MBB) const {
++  if(this->isChainTail())
++    return false;
+   MachineFunction::const_iterator I(this);
+   return std::next(I) == MachineFunction::const_iterator(MBB);
+ }
+Index: lib/CodeGen/MachineBlockLayout.cpp
+===================================================================
+--- lib/CodeGen/MachineBlockLayout.cpp	(nonexistent)
++++ lib/CodeGen/MachineBlockLayout.cpp	(working copy)
+@@ -0,0 +1,255 @@
++#include "llvm/CodeGen/MachineBlockLayout.h"
++#include "llvm/Support/Allocator.h"
++#include "llvm/CodeGen/MachineFunction.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/Target/TargetInstrInfo.h"
++#include "llvm/Target/TargetSubtargetInfo.h"
++#include <stdlib.h>
++using namespace llvm;
++
++#define DEBUG_TYPE "block-layout"
++
++INITIALIZE_PASS_BEGIN(MachineBlockLayout, "block-layout",
++                      "Code Stitcher's Basic Block Layout", false, false)
++INITIALIZE_PASS_DEPENDENCY(BBLayoutInput)
++INITIALIZE_PASS_END(MachineBlockLayout, "block-layout",
++                    "Code Stitcher's Basic Block Layout", false, false)
++
++#ifndef NDEBUG
++/// \brief Helper to print the name of a MBB.
++///
++/// Only used by debug logging.
++static std::string getMyBlockName(MachineBasicBlock *BB) {
++  std::string Result;
++  raw_string_ostream OS(Result);
++  OS << "BB#" << BB->getNumber();
++  OS << " ('" << BB->getName() << "')";
++  OS.flush();
++  return Result;
++}
++#endif
++
++
++
++char MachineBlockLayout::ID = 0;
++
++void MachineBlockLayout::buildChains(){
++  std::string fn_name(F->getFunction()->getName());
++  std::vector< std::vector <BlockInfo>> bb_chains;
++  BLI->getLayoutChain(fn_name,bb_chains);
++  std::vector<MachineBasicBlock *> eh_pads;
++	
++  for (unsigned i=0; i<bb_chains.size(); ++i){
++    auto chain = bb_chains[i];
++    MyBlockChain *Chain = nullptr;
++    for (BlockInfo bb_info : chain){
++      MachineBasicBlock * MBB = F->getBlockNumbered(bb_info.lbb.bbid);
++      if (Chain == nullptr)
++        Chain = new (ChainAllocator.Allocate()) MyBlockChain();
++      Chain->Blocks.push_back(std::make_pair(MBB,bb_info.align));
++      BlockToChain[MBB]=Chain;
++      MBB->setExecCount(bb_info.lbb.count);
++      for (auto succ_p: bb_info.lbb.succs)
++        MBB->setEdge(succ_p.first,succ_p.second);
++
++        for (auto caller: bb_info.lbb.preds){
++          auto it = BLI->bb_layout_position.find(caller.first);
++          if (it!=BLI->bb_layout_position.end())
++            MBB->setCallerEdge(caller.first, 
++                               (unsigned)std::abs((int)BLI->bb_layout[it->second].addr-(int)bb_info.lbb.addr), 
++                               caller.second);
++	}
++        MBB->setHotCode(bb_info.hot);
++        MBB->setHasBestTarget(bb_info.hasBestTarget);
++        MBB->setBestTarget(bb_info.bestTarget);
++        MBB->setPosition(bb_info.position+1);
++    }
++    if(Chain != nullptr)
++      FunctionChains.push_back(Chain);
++  }
++
++  for (MachineBasicBlock *eh_pad: eh_pads)
++    FunctionChains.back()->Blocks.push_back(std::make_pair(eh_pad,0));
++}
++
++bool MachineBlockLayout::runOnMachineFunction(MachineFunction &MF){
++  MBPI = &getAnalysis<MachineBranchProbabilityInfo>();
++  TLI = MF.getSubtarget().getTargetLowering();
++  MBFI = llvm::make_unique<BranchFolder::MBFIWrapper>(
++             getAnalysis<MachineBlockFrequencyInfo>());
++  MLI = &getAnalysis<MachineLoopInfo>();
++  BLI = &getAnalysis<BBLayoutInput>();
++  std::string fn_name = std::string(MF.getFunction()->getName());
++
++  auto profile_bb_count = BLI->getBBCount(fn_name);
++  auto current_bb_count = MF.getNumBlockIDs();
++
++  if (profile_bb_count == 0)
++    return false;
++
++  if (profile_bb_count != current_bb_count && profile_bb_count!=0){
++    errs() << "Function: " << fn_name << ", profile has " << profile_bb_count << "BBs.\n";
++    errs() << "Current compilation gives " << current_bb_count << "BBs.\n";
++    return false;
++  }
++
++  F = &MF;
++  TII = MF.getSubtarget().getInstrInfo();
++  FunctionChains.clear();
++  BlockToChain.clear();
++  buildChains();
++
++  MachineFunction::iterator InsertPos = F->begin();
++
++  SmallVector<MachineOperand, 4> Cond; // For AnalyzeBranch.
++  MachineBasicBlock *TBB, *FBB; // For AnalyzeBranch.
++  //MF.setAlignment(0);
++
++  for (MyBlockChain *Chain: FunctionChains){
++    assert(!Chain->Blocks.empty() && "Chain was empty!");
++    Chain->Blocks.front().first->setChainHead(true);
++    Chain->Blocks.back().first->setChainTail(true);
++
++    for (auto ChainBBP: Chain->Blocks){
++      MachineBasicBlock * ChainBB = ChainBBP.first;
++      DEBUG(dbgs() << (ChainBB == Chain->Blocks.begin()->first ? "Placing chain "
++                                                 : "         .... ")
++                    << getMyBlockName(ChainBB) << "\n");
++      //ChainBB->setAlignment(ChainBBP.second?4:0);
++
++      if (InsertPos != MachineFunction::iterator(ChainBB))
++      	F->splice(InsertPos, ChainBB);
++      else
++        ++InsertPos;
++      if (ChainBB == Chain->Blocks.begin()->first)
++        continue;
++      MachineBasicBlock *PrevBB = &*std::prev(MachineFunction::iterator(ChainBB));
++      Cond.clear();
++      TBB = FBB = nullptr;
++
++      if (!TII->analyzeBranch(*PrevBB, TBB, FBB, Cond))
++      	PrevBB->updateTerminator();
++    }
++
++    MachineBasicBlock * last_block = Chain->Blocks.back().first;
++    Cond.clear();
++    TBB = FBB = nullptr;
++
++    if (!TII->analyzeBranch(*last_block, TBB, FBB, Cond))
++      last_block->updateTerminator();
++
++    if (BLI->DoRemoveTailCalls){
++      MachineBasicBlock::iterator last_mir =  last_block->getLastNonDebugInstr();
++      if (last_mir!=last_block->end() &&
++        last_mir->isCall() && last_mir->isTerminator()){
++
++        MachineOperand& op = last_mir->getOperand(0);
++        if (op.isGlobal()){
++          const StringRef& name = op.getGlobal()->getName();
++          auto callee_pos = BLI->getFunctionPosition(name);
++          if (callee_pos == last_block->getPosition()+1){
++            last_block->remove_instr(&*last_mir);
++            last_block->setTailRemoved(name);
++          }
++        }
++      }
++    }
++  }
++
++  F->setChained();
++
++  alignBlocks();
++  return false;
++}
++
++void MachineBlockLayout::alignBlocks() {
++  // Walk through the backedges of the function now that we have fully laid out
++  // the basic blocks and align the destination of each backedge. We don't rely
++  // exclusively on the loop info here so that we can align backedges in
++  // unnatural CFGs and backedges that were introduced purely because of the
++  // loop rotations done during this layout pass.
++	
++  if (F->getFunction()->optForSize())
++    return;
++
++  const BranchProbability ColdProb(1, 5); // 20%
++  BlockFrequency EntryFreq = MBFI->getBlockFreq(&F->front());
++  BlockFrequency WeightedEntryFreq = EntryFreq * ColdProb;
++
++  for (MyBlockChain *Chain: FunctionChains)
++    for (auto ChainBBP: Chain->Blocks){
++      MachineBasicBlock * ChainBB = ChainBBP.first;
++      if (ChainBB == F->getBlockNumbered(0))
++        continue;
++
++      // Don't align non-looping basic blocks. These are unlikely to execute
++      // enough times to matter in practice. Note that we'll still handle
++      // unnatural CFGs inside of a natural outer loop (the common case) and
++      // rotated loops.
++      MachineLoop *L = MLI->getLoopFor(ChainBB);
++      if (!L){
++        ChainBB->setAlignment(0);	
++        continue;
++      }
++
++      unsigned Align = TLI->getPrefLoopAlignment(L);
++      if (!Align){
++        ChainBB->setAlignment(0);
++        continue; // Don't care about loop alignment.
++      }
++
++      // If the block is cold relative to the function entry don't waste space
++      // aligning it.
++      BlockFrequency Freq = MBFI->getBlockFreq(ChainBB);
++      if (Freq < WeightedEntryFreq){
++        ChainBB->setAlignment(0);	
++        continue;
++      }
++
++      // If the block is cold relative to its loop header, don't align it
++      // regardless of what edges into the block exist.
++      MachineBasicBlock *LoopHeader = L->getHeader();
++      BlockFrequency LoopHeaderFreq = MBFI->getBlockFreq(LoopHeader);
++      if (Freq < (LoopHeaderFreq * ColdProb)){
++        ChainBB->setAlignment(0);	
++        continue;
++      }
++
++      if (ChainBB==Chain->Blocks.front().first){
++        ChainBB->setAlignment(Align);
++        continue;
++      }
++
++      // Check for the existence of a non-layout predecessor which would benefit
++      // from aligning this block.
++      MachineBasicBlock *LayoutPred =
++          &*std::prev(MachineFunction::iterator(ChainBB));
++
++      // Force alignment if all the predecessors are jumps. We already checked
++      // that the block isn't cold above.
++      if (!LayoutPred->isSuccessor(ChainBB)) {
++        ChainBB->setAlignment(Align);
++        continue;
++      }
++
++      // Align this block if the layout predecessor's edge into this block is
++      // cold relative to the block. When this is true, other predecessors make up
++      // all of the hot entries into the block and thus alignment is likely to be
++      // important.
++      BranchProbability LayoutProb =
++      	  MBPI->getEdgeProbability(LayoutPred, ChainBB);
++      BlockFrequency LayoutEdgeFreq = MBFI->getBlockFreq(LayoutPred) * LayoutProb;
++      if (LayoutEdgeFreq <= (Freq * ColdProb))
++        ChainBB->setAlignment(Align);
++      else
++        ChainBB->setAlignment(0);
++    }
++}
++
++namespace llvm {
++  MachineFunctionPass *createMachineBlockLayoutPass() {
++    return new MachineBlockLayout();
++  }
++}
+Index: lib/CodeGen/TargetLoweringObjectFileImpl.cpp
+===================================================================
+--- lib/CodeGen/TargetLoweringObjectFileImpl.cpp	(revision 301135)
++++ lib/CodeGen/TargetLoweringObjectFileImpl.cpp	(working copy)
+@@ -1,4 +1,4 @@
+-//===-- llvm/CodeGen/TargetLoweringObjectFileImpl.cpp - Object File Info --===//
++//===-- llvm/CoGen/TargetLoweringObjectFileImpl.cpp - Object File Info --===//
+ //
+ //                     The LLVM Compiler Infrastructure
+ //
+@@ -42,6 +42,7 @@
+ #include "llvm/Target/TargetLowering.h"
+ #include "llvm/Target/TargetMachine.h"
+ #include "llvm/Target/TargetSubtargetInfo.h"
++#include "llvm/CodeGen/MachineFunction.h"
+ using namespace llvm;
+ using namespace dwarf;
+ 
+@@ -204,6 +205,30 @@
+   return C;
+ }
+ 
++/// codestitcher: we add hot functions to a different section so that 
++/// we can align that section in link time.
++MCSection *TargetLoweringObjectFileELF::HotSectionForFunction(
++		const Function *F, Mangler &Mang,
++		const TargetMachine &TM) const {
++  SmallString<1024> SectionName;
++  SectionName = ".text.stitch.hot.";
++  SectionName += F->getName();
++
++  // Infer section flags from the section name if we can.
++  SectionKind Kind = SectionKind::getText();
++  //Kind = getELFKindForNamedSection(SectionName, Kind);
++
++  StringRef Group = "";
++  unsigned Flags = getELFSectionFlags(Kind);
++  if (const Comdat *C = getELFComdat(F)) {
++    Group = C->getName();
++    Flags |= ELF::SHF_GROUP;
++  }
++  return getContext().getELFSection(SectionName,
++                                    getELFSectionType(SectionName, Kind), Flags,
++                                    /*EntrySize=*/0, Group);
++}
++
+ MCSection *TargetLoweringObjectFileELF::getExplicitSectionGlobal(
+     const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
+     const TargetMachine &TM) const {
+@@ -223,6 +248,35 @@
+                                     /*EntrySize=*/0, Group);
+ }
+ 
++
++/// codestitcher
++MCSection *TargetLoweringObjectFileELF::getExplicitSectionBB(
++                const MachineBasicBlock &MBB, Mangler &Mang,
++                const TargetMachine &TM) const {
++  SmallString<512> SectionName;
++  SectionName = ".text.stitch";
++  if (MBB.isHotCode())
++    SectionName += ".hot.";
++  else
++    SectionName += ".cold.";
++  SectionName += MBB.getBBName().c_str();
++  const Function * F = MBB.getParent()->getFunction();
++
++  // Infer section flags from the section name if we can.
++  SectionKind Kind = SectionKind::getText();
++  //Kind = getELFKindForNamedSection(SectionName, Kind);
++
++  StringRef Group = "";
++  unsigned Flags = getELFSectionFlags(Kind);
++  if (const Comdat *C = getELFComdat(F)) {
++    Group = C->getName();
++    Flags |= ELF::SHF_GROUP;
++  }
++  return getContext().getELFSection(SectionName,
++                                    getELFSectionType(SectionName, Kind), Flags,
++                                    /*EntrySize=*/0, Group);
++}
++
+ /// Return the section prefix name used by options FunctionsSections and
+ /// DataSections.
+ static StringRef getSectionPrefixForGlobal(SectionKind Kind) {
+@@ -541,6 +595,15 @@
+                      "' cannot be lowered.");
+ }
+ 
++MCSection *TargetLoweringObjectFileMachO::getExplicitSectionBB(
++    const MachineBasicBlock &MBB, Mangler &Mang,
++    const TargetMachine &TM) const { assert("not implemented" && false); return nullptr;}
++
++MCSection *TargetLoweringObjectFileMachO::HotSectionForFunction(
++		const Function *F, Mangler &Mang,
++		const TargetMachine &TM) const { assert("not implemented" && false); return nullptr;}
++ 
++
+ MCSection *TargetLoweringObjectFileMachO::getExplicitSectionGlobal(
+     const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
+     const TargetMachine &TM) const {
+@@ -885,6 +948,14 @@
+   return 0;
+ }
+ 
++MCSection *TargetLoweringObjectFileCOFF::getExplicitSectionBB(
++    const MachineBasicBlock &MBB, Mangler &Mang,
++    const TargetMachine &TM) const { assert("not implemented" && false); return nullptr;}
++
++MCSection *TargetLoweringObjectFileCOFF::HotSectionForFunction(
++		const Function *F, Mangler &Mang,
++		const TargetMachine &TM) const { assert("not implemented" && false); return nullptr;}
++
+ MCSection *TargetLoweringObjectFileCOFF::getExplicitSectionGlobal(
+     const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
+     const TargetMachine &TM) const {
+Index: lib/CodeGen/TargetPassConfig.cpp
+===================================================================
+--- lib/CodeGen/TargetPassConfig.cpp	(revision 301135)
++++ lib/CodeGen/TargetPassConfig.cpp	(working copy)
+@@ -124,6 +124,20 @@
+                           "Enable both variants of CFL-AA"),
+                clEnumValEnd));
+ 
++/// codestitcher-flags: BEGIN
++static cl::opt<std::string> BBLayoutFile("bb-layout", cl::Hidden,
++    cl::desc("path to the bb layout file"),cl::init("option-unspecified"));
++
++static cl::opt<bool> RemoveTailCalls("remove-tail-calls", cl::Hidden,
++    cl::desc("Remove tail calls when doing BB reordering"),cl::init(false));
++
++static cl::opt<std::string> FuncLayoutFile("func-layout", cl::Hidden,
++    cl::desc("path to the function layout file"),cl::init("option-unspecified"));
++
++static cl::opt<bool> EnableHugePages("enable-huge-pages",cl::Hidden,
++    cl::desc("Enable huge pages"));
++/// codestitcher-flags: END
++
+ /// Allow standard passes to be disabled by command line options. This supports
+ /// simple binary flags that either suppress the pass or do nothing.
+ /// i.e. -disable-mypass=false has no effect.
+@@ -420,6 +434,16 @@
+ /// Add common target configurable passes that perform LLVM IR to IR transforms
+ /// following machine independent optimization.
+ void TargetPassConfig::addIRPasses() {
++  if (!StringRef(BBLayoutFile.getValue()).equals("option-unspecified")){
++    StringRef layout_filename = StringRef(BBLayoutFile.getValue());
++    addPass(createBBLayoutInputPass(layout_filename,RemoveTailCalls));
++  }
++
++  if (!StringRef(FuncLayoutFile.getValue()).equals("option-unspecified")){
++    StringRef layout_filename = StringRef(FuncLayoutFile.getValue());
++    addPass(createFunctionLayoutInputPass(layout_filename));
++  }
++
+   switch (UseCFLAA) {
+   case CFLAAType::Steensgaard:
+     addPass(createCFLSteensAAWrapperPass());
+@@ -469,6 +493,10 @@
+ 
+   if (getOptLevel() != CodeGenOpt::None && !DisablePartialLibcallInlining)
+     addPass(createPartiallyInlineLibCallsPass());
++
++  /// codestitcher: huge pages
++  if(EnableHugePages)
++    addPass(createRemapInHugePagesPass());
+ }
+ 
+ /// Turn exception handling constructs into something the code generators can
+@@ -643,6 +671,11 @@
+   if (getOptLevel() != CodeGenOpt::None)
+     addBlockPlacement();
+ 
++  addPass(createMBBRenumberingPass());
++
++  if(!StringRef(BBLayoutFile.getValue()).equals("option-unspecified"))
++    addPass(createMachineBlockLayoutPass());
++
+   addPreEmitPass();
+ 
+   if (TM->Options.EnableIPRA)
+Index: lib/MC/MCAssembler.cpp
+===================================================================
+--- lib/MC/MCAssembler.cpp	(revision 301135)
++++ lib/MC/MCAssembler.cpp	(working copy)
+@@ -714,6 +714,25 @@
+ }
+ 
+ void MCAssembler::Finish() {
++  if(!getContext().ChainOrderMap.empty()){
++    std::stable_sort(Sections.begin(),Sections.end(), [this](const MCSection *lsec, const MCSection *rsec){
++      auto& order_map = getContext().ChainOrderMap;
++
++      auto* elf_lsec = dyn_cast<const MCSectionELF>(lsec);
++      auto* elf_rsec = dyn_cast<const MCSectionELF>(rsec);
++
++      StringRef lsec_name = elf_lsec->getSectionName();
++      StringRef rsec_name = elf_rsec->getSectionName();
++
++      auto lit = order_map.find(lsec_name);
++      auto rit = order_map.find(rsec_name);
++
++      unsigned lsec_index = (!lsec->getKind().isText() || lit==order_map.end())?order_map.size():lit->second;
++      unsigned rsec_index = (!rsec->getKind().isText() || rit==order_map.end())?order_map.size():rit->second;
++
++      return (lsec_index < rsec_index);
++    });
++  }
+   // Create the layout object.
+   MCAsmLayout Layout(*this);
+   layout(Layout);
+Index: lib/MC/MCStreamer.cpp
+===================================================================
+--- lib/MC/MCStreamer.cpp	(revision 301135)
++++ lib/MC/MCStreamer.cpp	(working copy)
+@@ -193,6 +193,21 @@
+   return CurFrame && !CurFrame->End;
+ }
+ 
++/// codestitcher
++void MCStreamer::pushDwarfFrameInfo(MCDwarfFrameInfo DFI) {
++  if (hasUnfinishedDwarfFrameInfo())
++    report_fatal_error("Pushing a frame before finishing the previous one!");
++  DwarfFrameInfos.push_back(DFI);
++}
++
++MCDwarfFrameInfo MCStreamer::popDwarfFrameInfo() {
++  if (!hasUnfinishedDwarfFrameInfo())
++    report_fatal_error("Can only pop unfinished frames!");
++  auto DFI = DwarfFrameInfos.back();
++  DwarfFrameInfos.pop_back();
++  return DFI;
++}
++
+ void MCStreamer::EnsureValidDwarfFrame() {
+   MCDwarfFrameInfo *CurFrame = getCurrentDwarfFrameInfo();
+   if (!CurFrame || CurFrame->End)
+Index: lib/Support/BranchProbability.cpp
+===================================================================
+--- lib/Support/BranchProbability.cpp	(revision 301135)
++++ lib/Support/BranchProbability.cpp	(working copy)
+@@ -22,14 +22,21 @@
+ const uint32_t BranchProbability::D;
+ 
+ raw_ostream &BranchProbability::print(raw_ostream &OS) const {
+-  if (isUnknown())
+-    return OS << "?%";
++  //if (isUnknown())
++  //  return OS << "?%";
+ 
+   // Get a percentage rounded to two decimal digits. This avoids
+   // implementation-defined rounding inside printf.
+-  double Percent = rint(((double)N / D) * 100.0 * 100.0) / 100.0;
+-  return OS << format("0x%08" PRIx32 " / 0x%08" PRIx32 " = %.2f%%", N, D,
+-                      Percent);
++  //double Percent = rint(((double)N / D) * 100.0 * 100.0) / 100.0;
++  //return OS << format("0x%08" PRIx32 " / 0x%08" PRIx32 " = %.2f%%", N, D,
++  //                    Percent);
++  /// codestitcher
++  if (isUnknown())
++    return OS;
++  else {
++    double prob = (double)N / D;
++    return OS << "\"prob\":" << format("%.4f",prob);
++  }
+ }
+ 
+ LLVM_DUMP_METHOD void BranchProbability::dump() const { print(dbgs()) << '\n'; }

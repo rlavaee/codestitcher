@@ -1,0 +1,250 @@
+diff -rc ../binutils-2.30/gold/defstd.cc binutils-2.30/gold/defstd.cc
+*** ../binutils-2.30/gold/defstd.cc	2018-01-13 08:31:16.000000000 -0500
+--- binutils-2.30/gold/defstd.cc	2018-05-04 17:31:42.625388466 -0400
+***************
+*** 36,41 ****
+--- 36,91 ----
+  
+  const Define_symbol_in_section in_section[] =
+  {
++    // codestitcher-symbols: BEGIN
++    {
++     "_hot_text_begin", // name
++     ".text.stitch.hot",                // output_section
++     0,                         // value
++     0,                         // size
++     elfcpp::STT_NOTYPE,                // type
++     elfcpp::STB_LOCAL,         // binding
++     elfcpp::STV_HIDDEN,                // visibility
++     0,                         // nonvis
++     false,                     // offset_is_from_end
++     true                       // only_if_ref
++   },
++   {
++     "_hot_text_end",   // name
++     ".text.stitch.hot",                // output_section
++     0,                         // value
++     0,                         // size
++     elfcpp::STT_NOTYPE,                // type
++     elfcpp::STB_LOCAL,         // binding
++     elfcpp::STV_HIDDEN,                // visibility
++     0,                         // nonvis
++     true,                      // offset_is_from_end
++     true                       // only_if_ref
++   },
++   {
++     "_text_end",       // name
++     ".text",           // output_section
++     0,                         // value
++     0,                         // size
++     elfcpp::STT_NOTYPE,                // type
++     elfcpp::STB_LOCAL,         // binding
++     elfcpp::STV_HIDDEN,                // visibility
++     0,                         // nonvis
++     true,                      // offset_is_from_end
++     true                       // only_if_ref
++   },
++   {
++     "_text_begin",     // name
++     ".text",           // output_section
++     0,                         // value
++     0,                         // size
++     elfcpp::STT_NOTYPE,                // type
++     elfcpp::STB_LOCAL,         // binding
++     elfcpp::STV_HIDDEN,                // visibility
++     0,                         // nonvis
++     false,                     // offset_is_from_end
++     true                       // only_if_ref
++   },
++   /// codestitcher-symbols: END
+    {
+      "__preinit_array_start",	// name
+      ".preinit_array",		// output_section
+diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
+*** ../binutils-2.30/gold/layout.cc	2018-01-13 08:31:16.000000000 -0500
+--- binutils-2.30/gold/layout.cc	2018-05-04 17:23:09.889064978 -0400
+***************
+*** 1125,1133 ****
+    static const char* const text_section_sort[] =
+    {
+      ".text.unlikely",
+      ".text.exit",
+      ".text.startup",
+!     ".text.hot"
+    };
+  
+    for (size_t i = 0;
+--- 1125,1135 ----
+    static const char* const text_section_sort[] =
+    {
+      ".text.unlikely",
++     ".text.stitch.cold",
+      ".text.exit",
+      ".text.startup",
+!     ".text.hot",
+!     ".text.stitch.hot",
+    };
+  
+    for (size_t i = 0;
+***************
+*** 1849,1854 ****
+--- 1851,1862 ----
+    if (this->sections_are_attached_)
+      this->attach_section_to_segment(&parameters->target(), os);
+  
++   // codestitcher: Align the hot text section to page size
++   if (strcmp(name, ".text.stitch.hot") == 0){
++     const uint64_t abi_pagesize = parameters->target().abi_pagesize();
++     os->set_addralign(abi_pagesize);
++   }
++ 
+    return os;
+  }
+  
+***************
+*** 1905,1910 ****
+--- 1913,1920 ----
+  	    return ORDER_INIT;
+  	  else if (strcmp(os->name(), ".fini") == 0)
+  	    return ORDER_FINI;
++           else if (strcmp(os->name(), ".text.stitch.hot") == 0)
++             return ORDER_TEXT_STITCH_HOT;
+  	}
+        return is_execinstr ? ORDER_TEXT : ORDER_READONLY;
+      }
+***************
+*** 2686,2691 ****
+--- 2696,2705 ----
+      {
+        if (!line.empty() && line[line.length() - 1] == '\r')   // Windows
+  	line.resize(line.length() - 1);
++       // codestitcher: hfsort somtimes outputs lines with one extra space
++       // in the beginning
++       if (!line.empty() && line[0]==' ')
++         line = line.substr(1);
+        // Ignore comments, beginning with '#'
+        if (line[0] == '#')
+  	{
+***************
+*** 5091,5096 ****
+--- 5105,5111 ----
+  #define MAPPING_INIT_EXACT(f, t) { f, 0, t, sizeof(t) - 1 }
+  const Layout::Section_name_mapping Layout::section_name_mapping[] =
+  {
++   MAPPING_INIT(".text.stitch.hot.", ".text.stitch.hot"),
+    MAPPING_INIT(".text.", ".text"),
+    MAPPING_INIT(".rodata.", ".rodata"),
+    MAPPING_INIT(".data.rel.ro.local.", ".data.rel.ro.local"),
+diff -rc ../binutils-2.30/gold/layout.h binutils-2.30/gold/layout.h
+*** ../binutils-2.30/gold/layout.h	2018-01-13 08:31:16.000000000 -0500
+--- binutils-2.30/gold/layout.h	2018-05-04 17:26:03.302496822 -0400
+***************
+*** 421,426 ****
+--- 421,429 ----
+  
+    // The PLT.
+    ORDER_PLT,
++  
++   // codestitcher: hot text section
++   ORDER_TEXT_STITCH_HOT,
+  
+    // The regular text sections.
+    ORDER_TEXT,
+diff -rc ../binutils-2.30/gold/object.cc binutils-2.30/gold/object.cc
+*** ../binutils-2.30/gold/object.cc	2018-01-13 08:31:16.000000000 -0500
+--- binutils-2.30/gold/object.cc	2018-05-04 17:28:40.771802580 -0400
+***************
+*** 374,380 ****
+        || (is_prefix_of(".gnu.linkonce.d", name)
+  	  && strstr(name, "personality"))
+        || (is_prefix_of(".rodata", name)
+! 	  && strstr(name, "nptl_version")))
+      {
+        return true;
+      }
+--- 374,381 ----
+        || (is_prefix_of(".gnu.linkonce.d", name)
+  	  && strstr(name, "personality"))
+        || (is_prefix_of(".rodata", name)
+! 	  && strstr(name, "nptl_version"))
+!       || (is_prefix_of(".text.stitch", name)))
+      {
+        return true;
+      }
+diff -rc ../binutils-2.30/gold/options.cc binutils-2.30/gold/options.cc
+*** ../binutils-2.30/gold/options.cc	2018-01-13 08:31:16.000000000 -0500
+--- binutils-2.30/gold/options.cc	2018-05-04 17:39:49.805586682 -0400
+***************
+*** 26,31 ****
+--- 26,32 ----
+  #include <cstdlib>
+  #include <cstring>
+  #include <fstream>
++ #include <unistd.h>
+  #include <vector>
+  #include <iostream>
+  #include <sys/stat.h>
+***************
+*** 1076,1082 ****
+  {
+    if (this->plugins_ == NULL)
+      gold_fatal("--plugin-opt requires --plugin.");
+!   this->plugins_->add_plugin_option(arg);
+  }
+  
+  // Set up variables and other state that isn't set up automatically by
+--- 1077,1130 ----
+  {
+    if (this->plugins_ == NULL)
+      gold_fatal("--plugin-opt requires --plugin.");
+!   /// codestitcher: forward layout flags to the gold plugin
+!   if(strstr(arg,"-bb-layout")!=NULL){
+!     // fprintf(stderr,"arg is %s\n",arg);
+!     const char * layout_file_suffix = strchr(arg,'=')+1;
+!     char * layout_file_name = (char *)(malloc(strlen(output_file_name())+
+!                               strlen(".layout")+1+
+!                               strlen(layout_file_suffix)+1));
+!     strcpy(layout_file_name,output_file_name());
+!     strcat(layout_file_name,".layout.");
+!     strcat(layout_file_name,layout_file_suffix);
+!     // fprintf(stderr,"layout filename is: %s\n",layout_file_name);
+!     if (access(layout_file_name, F_OK) != -1){
+!       /* file exists */
+!       char * newarg = (char *)(malloc(strlen("-bb-layout")+1+strlen(layout_file_name)+1));
+!       strcpy(newarg,"-bb-layout");
+!       strcat(newarg,"=");
+!       strcat(newarg,layout_file_name);
+!       // fprintf(stderr,"newarg is %s\n",newarg);
+!       this->plugins_->add_plugin_option(newarg);
+!     }else{
+!       fprintf(stderr,"file does not exist: %s\n",layout_file_name);
+!       fprintf(stderr,"proceeding without applying layout\n");
+!     }
+!   }else if(strstr(arg,"-func-layout")!=NULL){
+!     // fprintf(stderr,"arg is %s\n",arg);
+!     const char * layout_file_suffix = strchr(arg,'=')+1;
+!     char * layout_file_name = (char *)(malloc(strlen(output_file_name())+
+!                               strlen(".layout")+1+
+!                               strlen(layout_file_suffix)+1));
+!     strcpy(layout_file_name,output_file_name());
+!     strcat(layout_file_name,".layout.");
+!     strcat(layout_file_name,layout_file_suffix);
+!     // fprintf(stderr,"layout filename is: %s\n",layout_file_name);
+!     if (access(layout_file_name, F_OK) != -1){
+!       /* file exists */
+!       char * newarg = (char *)(malloc(strlen("-func-layout")+1+
+!                       strlen(layout_file_name)+1));
+!       strcpy(newarg,"-func-layout");
+!       strcat(newarg,"=");
+!       strcat(newarg,layout_file_name);
+!       // fprintf(stderr,"newarg is %s\n",newarg);
+!       this->plugins_->add_plugin_option(newarg);
+!     }else{
+!       fprintf(stderr,"file does not exist: %s\n",layout_file_name);
+!       fprintf(stderr,"proceeding without applying layout\n");
+!     }
+!   }else
+!     this->plugins_->add_plugin_option(arg);
+  }
+  
+  // Set up variables and other state that isn't set up automatically by

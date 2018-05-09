@@ -1,0 +1,450 @@
+diff -ruN linux-4.16.7-orig/tools/perf/builtin-script.c linux-4.16.7/tools/perf/builtin-script.c
+--- linux-4.16.7-orig/tools/perf/builtin-script.c	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/builtin-script.c	2018-05-07 18:00:20.061127286 -0400
+@@ -47,6 +47,8 @@
+ 
+ #include "sane_ctype.h"
+ 
++#define UNUSED(x) (void)(x)
++
+ static char const		*script_name;
+ static char const		*generate_script_lang;
+ static bool			debug_mode;
+@@ -95,6 +97,7 @@
+ 	PERF_OUTPUT_UREGS	    = 1U << 27,
+ 	PERF_OUTPUT_METRIC	    = 1U << 28,
+ 	PERF_OUTPUT_MISC            = 1U << 29,
++        PERF_OUTPUT_BRSTACKCF       = 1U << 30,
+ };
+ 
+ struct output_option {
+@@ -131,6 +134,7 @@
+ 	{.str = "phys_addr", .field = PERF_OUTPUT_PHYS_ADDR},
+ 	{.str = "metric", .field = PERF_OUTPUT_METRIC},
+ 	{.str = "misc", .field = PERF_OUTPUT_MISC},
++        {.str = "brstackcf", .field = PERF_OUTPUT_BRSTACKCF},
+ };
+ 
+ enum {
+@@ -840,11 +844,92 @@
+ 
+ 	return printed;
+ }
++
+ #define MAXBB 16384UL
+ 
++static int grab_cf(u64 start, u64 end,
++                    struct machine *machine, struct thread *thread,
++                    u8 *cpumode, bool last)
++{
++        struct addr_location als,ale;
++        bool kernel;
++        struct symbol * sym = NULL;
++        struct symbol * next_sym=NULL;
++        int len;
++
++        UNUSED(last);
++
++        if (!start || !end)
++                return 0;
++
++        kernel = machine__kernel_ip(machine, start);
++        if (kernel)
++                *cpumode = PERF_RECORD_MISC_KERNEL;
++        else
++                *cpumode = PERF_RECORD_MISC_USER;
++
++        /*
++         * Block overlaps between kernel and user.
++         * This can happen due to ring filtering
++         * On Intel CPUs the entry into the kernel is filtered,
++         * but the exit is not. Let the caller patch it up.
++         */
++        if (kernel != machine__kernel_ip(machine, end)) {
++                //printf("\tblock %" PRIx64 "-%" PRIx64 " transfers between kernel and user\n",
++                //              start, end);
++                return -ENXIO;
++        }
++
++        memset(&als, 0, sizeof(als));
++        memset(&ale, 0, sizeof(ale));
++        if (end - start > MAXBB - MAXINSN) {
++                //if (last)
++                //      printf("\tbrstack does not reach to final jump (%" PRIx64 "-%" PRIx64 ")\n", start, end);
++                //else
++                //      printf("\tblock %" PRIx64 "-%" PRIx64 " (%" PRIu64 ") too long to dump\n", start, end, end - start);
++                return 0;
++        }
++
++        thread__find_addr_map(thread, *cpumode, MAP__FUNCTION, start, &als);
++        thread__find_addr_map(thread, *cpumode, MAP__FUNCTION, end, &ale);
++
++        if (!als.map || !ale.map || !als.map->dso || !ale.map->dso || (als.map->dso!=ale.map->dso)) {
++                //printf("\tcannot resolve %" PRIx64 "-%" PRIx64 "\n", start, end);
++                return 0;
++        }
++        if ((als.map->dso->data.status == DSO_DATA_STATUS_ERROR) || (ale.map->dso->data.status == DSO_DATA_STATUS_ERROR)) {
++                //printf("\tcannot resolve %" PRIx64 "-%" PRIx64 "\n", start, end);
++                return 0;
++        }
++
++        /* Load maps to ensure dso->is_64_bit has been updated */
++        //map__load(als.map);
++
++        sym = als.sym = map__find_symbol(als.map, als.addr);
++        ale.sym = map__find_symbol(ale.map, ale.addr);
++
++        len = 0;
++
++        while(sym && (sym!=ale.sym)){
++                next_sym = dso__next_symbol(sym);
++                if(next_sym==NULL)
++                        return 0;
++                inc_br_count(sym, next_sym, sym->end-sym->start, 0, true);
++                len++;
++                
++                sym = next_sym;
++        }       
++        
++        //offset = al.map->map_ip(al.map, start);
++
++        //*is64bit = als.map->dso->is_64_bit;
++        return len;
++}
++
++
+ static int grab_bb(u8 *buffer, u64 start, u64 end,
+-		    struct machine *machine, struct thread *thread,
+-		    bool *is64bit, u8 *cpumode, bool last)
++		   struct machine *machine, struct thread *thread,
++		   bool *is64bit, u8 *cpumode, bool last)
+ {
+ 	long offset, len;
+ 	struct addr_location al;
+@@ -1070,6 +1155,76 @@
+ 	return printed;
+ }
+ 
++static void perf_sample__fprintf_brstackcf(struct perf_sample *sample,
++                                     struct thread *thread,
++                                     struct perf_event_attr *attr,
++                                     struct machine *machine)
++{
++	struct branch_stack *br = sample->branch_stack;
++	u64 start, end, from, to;
++	int i, len, nr;
++	struct perf_insn x;
++
++	UNUSED(attr);
++	UNUSED(len);
++
++	if (!(br && br->nr))
++		return;
++	nr = br->nr;
++	if (max_blocks && nr > max_blocks + 1)
++		nr = max_blocks + 1;
++
++	x.thread = thread;
++	x.cpu = sample->cpu;
++
++	/* Print all blocks */
++	for (i = nr - 1; i >= 0; i--) {
++		struct addr_location alf,alt;
++		memset(&alf, 0, sizeof(alf));
++		memset(&alt, 0, sizeof(alt));
++		from = br->entries[i].from;
++		to   = br->entries[i].to;
++
++		if (from && to){
++			thread__find_addr_map(thread, sample->cpumode, MAP__FUNCTION, from, &alf);
++			if (alf.map)
++				alf.sym = map__find_symbol(alf.map, alf.addr);
++
++			thread__find_addr_map(thread, sample->cpumode, MAP__FUNCTION, to, &alt);
++			if (alt.map)
++				alt.sym = map__find_symbol(alt.map, alt.addr);
++
++			if(alt.sym && alf.sym && (alf.map==alt.map) &&
++                           ((alf.sym!=alt.sym) || (alt.addr==alt.sym->start)))
++				inc_br_count(alf.sym, alt.sym, alf.addr - alf.sym->start,
++                                             alt.addr-alt.sym->start,
++                                             br->entries[i].flags.predicted);
++		}
++
++		if(i>0){
++			if(i==1 && (from==br->entries[i-1].from) && (to==br->entries[i-1].to))
++				break;
++			start   = br->entries[i].to;
++			end = br->entries[i-1].from;
++			len = grab_cf(start, end, machine, thread, &x.cpumode, false);
++			/* Patch up missing kernel transfers due to ring filters */
++			if (len == -ENXIO && i > 1) {
++				end = br->entries[--i-1].from;
++				len = grab_cf(start, end, machine, thread, &x.cpumode, false);
++			}
++		}
++	}
++	// Hit the branch? In this case we are already done, and the target
++	// has not been executed yet.
++	if (br->entries[0].from == sample->ip)
++		return;
++	if (br->entries[0].flags.abort)
++		return;
++        // Print final block upto sample
++	start = br->entries[0].to;
++	end = sample->ip;
++}
++
+ static int perf_sample__fprintf_addr(struct perf_sample *sample,
+ 				     struct thread *thread,
+ 				     struct perf_event_attr *attr, FILE *fp)
+@@ -1693,6 +1848,8 @@
+ 		perf_sample__fprintf_brstacksym(sample, thread, attr, fp);
+ 	else if (PRINT_FIELD(BRSTACKOFF))
+ 		perf_sample__fprintf_brstackoff(sample, thread, attr, fp);
++        else if (PRINT_FIELD(BRSTACKCF))
++                perf_sample__fprintf_brstackcf(sample, thread, attr, machine);
+ 
+ 	if (perf_evsel__is_bpf_output(evsel) && PRINT_FIELD(BPF_OUTPUT))
+ 		perf_sample__fprintf_bpf_output(sample, fp);
+@@ -3480,6 +3637,8 @@
+ 
+ 	err = __cmd_script(&script);
+ 
++	machines__fprintf_cfs(&session->machines, stdout);
++
+ 	flush_scripting();
+ 
+ out_delete:
+diff -ruN linux-4.16.7-orig/tools/perf/util/dso.c linux-4.16.7/tools/perf/util/dso.c
+--- linux-4.16.7-orig/tools/perf/util/dso.c	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/dso.c	2018-05-07 14:06:37.814997189 -0400
+@@ -1445,6 +1445,18 @@
+ 	return ret;
+ }
+ 
++size_t __dsos__fprintf_cf(struct list_head *head, FILE *fp)
++{
++	struct dso *pos;
++	size_t ret = 0;
++
++	list_for_each_entry(pos, head, node) {
++		ret += dso__fprintf_cf(pos, MAP__FUNCTION, fp);
++	}
++
++	return ret;
++}
++
+ size_t __dsos__fprintf(struct list_head *head, FILE *fp)
+ {
+ 	struct dso *pos;
+@@ -1467,6 +1479,19 @@
+ 	return fprintf(fp, "%s", sbuild_id);
+ }
+ 
++size_t dso__fprintf_cf(struct dso *dso, enum map_type type, FILE *fp)
++{
++	struct rb_node *nd;
++	size_t ret = fprintf(fp, "dso: %s\n", dso->long_name);
++
++	for (nd = rb_first(&dso->symbols[type]); nd; nd = rb_next(nd)) {
++		struct symbol *pos = rb_entry(nd, struct symbol, rb_node);
++		ret += symbol__fprintf_cf(pos, fp);
++	}
++
++	return ret;
++}
++
+ size_t dso__fprintf(struct dso *dso, enum map_type type, FILE *fp)
+ {
+ 	struct rb_node *nd;
+diff -ruN linux-4.16.7-orig/tools/perf/util/dso.h linux-4.16.7/tools/perf/util/dso.h
+--- linux-4.16.7-orig/tools/perf/util/dso.h	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/dso.h	2018-05-07 14:03:53.205598209 -0400
+@@ -347,11 +347,13 @@
+ size_t __dsos__fprintf_buildid(struct list_head *head, FILE *fp,
+ 			       bool (skip)(struct dso *dso, int parm), int parm);
+ size_t __dsos__fprintf(struct list_head *head, FILE *fp);
++size_t __dsos__fprintf_cf(struct list_head *head, FILE *fp);
+ 
+ size_t dso__fprintf_buildid(struct dso *dso, FILE *fp);
+ size_t dso__fprintf_symbols_by_name(struct dso *dso,
+ 				    enum map_type type, FILE *fp);
+ size_t dso__fprintf(struct dso *dso, enum map_type type, FILE *fp);
++size_t dso__fprintf_cf(struct dso *dso, enum map_type type, FILE *fp);
+ 
+ static inline bool dso__is_vmlinux(struct dso *dso)
+ {
+diff -ruN linux-4.16.7-orig/tools/perf/util/machine.c linux-4.16.7/tools/perf/util/machine.c
+--- linux-4.16.7-orig/tools/perf/util/machine.c	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/machine.c	2018-05-07 14:00:13.823732299 -0400
+@@ -693,6 +693,19 @@
+ 	return map;
+ }
+ 
++size_t machines__fprintf_cfs(struct machines *machines, FILE *fp)
++{
++	struct rb_node *nd;
++	size_t ret = __dsos__fprintf_cf(&machines->host.dsos.head, fp);
++
++	for (nd = rb_first(&machines->guests); nd; nd = rb_next(nd)) {
++		struct machine *pos = rb_entry(nd, struct machine, rb_node);
++		ret += __dsos__fprintf_cf(&pos->dsos.head, fp);
++	}
++
++	return ret;
++}
++
+ size_t machines__fprintf_dsos(struct machines *machines, FILE *fp)
+ {
+ 	struct rb_node *nd;
+diff -ruN linux-4.16.7-orig/tools/perf/util/machine.h linux-4.16.7/tools/perf/util/machine.h
+--- linux-4.16.7-orig/tools/perf/util/machine.h	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/machine.h	2018-05-07 13:59:00.827110967 -0400
+@@ -235,6 +235,7 @@
+ size_t machine__fprintf_dsos_buildid(struct machine *machine, FILE *fp,
+ 				     bool (skip)(struct dso *dso, int parm), int parm);
+ size_t machines__fprintf_dsos(struct machines *machines, FILE *fp);
++size_t machines__fprintf_cfs(struct machines *machines, FILE *fp);
+ size_t machines__fprintf_dsos_buildid(struct machines *machines, FILE *fp,
+ 				     bool (skip)(struct dso *dso, int parm), int parm);
+ 
+diff -ruN linux-4.16.7-orig/tools/perf/util/symbol.c linux-4.16.7/tools/perf/util/symbol.c
+--- linux-4.16.7-orig/tools/perf/util/symbol.c	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/symbol.c	2018-05-07 14:20:40.326153053 -0400
+@@ -2224,3 +2224,32 @@
+ 	free(bf);
+ 	return 0;
+ }
++
++void inc_br_count(struct symbol * sym_from, struct symbol * sym_to,
++                  u64 off_from, u64 off_to, bool predicted){
++	int i, ne = sym_from->ncf_edges;
++	struct cf_edge * cur_cf_edges = sym_from->cf_edges;
++	for(i=0; i < ne; ++i){
++		struct cf_edge *cf_edge = &sym_from->cf_edges[i];
++		if((cf_edge->sym_to == sym_to) &&
++                   (cf_edge->off_from == off_from) &&
++                   (cf_edge->off_to == off_to) &&
++                   (cf_edge->predicted == predicted)){
++			cf_edge->count++;
++			return;
++		}
++	}
++	/* not found in edge list. create new edge*/
++	sym_from->cf_edges = calloc(ne+1, sizeof(struct cf_edge));
++	if(ne){
++		memcpy(sym_from->cf_edges, cur_cf_edges, sizeof(struct cf_edge)*ne);
++		free(cur_cf_edges);
++	}
++	sym_from->cf_edges[ne].sym_from = sym_from;
++	sym_from->cf_edges[ne].sym_to = sym_to;
++	sym_from->cf_edges[ne].off_from = off_from;
++	sym_from->cf_edges[ne].off_to = off_to;
++	sym_from->cf_edges[ne].predicted = predicted;
++	sym_from->cf_edges[ne].count = 1;
++	sym_from->ncf_edges++;
++}
+diff -ruN linux-4.16.7-orig/tools/perf/util/symbol_fprintf.c linux-4.16.7/tools/perf/util/symbol_fprintf.c
+--- linux-4.16.7-orig/tools/perf/util/symbol_fprintf.c	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/symbol_fprintf.c	2018-05-07 14:25:14.604489293 -0400
+@@ -2,6 +2,7 @@
+ #include <elf.h>
+ #include <inttypes.h>
+ #include <stdio.h>
++#include <string.h>
+ 
+ #include "symbol.h"
+ 
+@@ -14,6 +15,49 @@
+ 		       sym->name);
+ }
+ 
++size_t symbol__fprintf_cf(struct symbol *sym, FILE *fp)
++{
++	int ret = 0;
++	int i;
++	const char * ptr;
++	char * sym_from_name_tok;
++	char * sym_to_name_tok;
++	size_t len;
++
++	if(sym->ncf_edges != 0){
++		ptr = strchr(sym->name, '-');
++		if(ptr){
++			len = ptr-sym->name;
++			sym_from_name_tok = (char*)malloc(len+1);
++			strncpy(sym_from_name_tok, sym->name, len);
++			sym_from_name_tok[len]='\0';
++		}
++
++		ret += fprintf(fp, "%s(",ptr?sym_from_name_tok:sym->name);
++		for(i=0; i < sym->ncf_edges; ++i){
++			const char * sym_to_name = sym->cf_edges[i].sym_to->name;
++			ptr = strchr(sym_to_name, '-');
++			if(ptr){
++				len = ptr-sym_to_name;
++				sym_to_name_tok = (char*)malloc(len+1);
++				strncpy(sym_to_name_tok, sym_to_name, len);
++				sym_to_name_tok[len]='\0';
++			}
++
++			ret += fprintf(fp, "%s#[%lu,%lu]#%s#%lu",
++			ptr?sym_to_name_tok:sym_to_name,
++			sym->cf_edges[i].off_from,
++			sym->cf_edges[i].off_to,
++			sym->cf_edges[i].predicted?"P":"M",
++			sym->cf_edges[i].count);
++			if(i!=sym->ncf_edges-1)
++				ret += fprintf(fp,";");
++		}
++		ret += fprintf(fp,")\n");
++	}
++	return ret;
++}
++
+ size_t __symbol__fprintf_symname_offs(const struct symbol *sym,
+ 				      const struct addr_location *al,
+ 				      bool unknown_as_addr,
+diff -ruN linux-4.16.7-orig/tools/perf/util/symbol.h linux-4.16.7/tools/perf/util/symbol.h
+--- linux-4.16.7-orig/tools/perf/util/symbol.h	2018-05-01 15:47:31.000000000 -0400
++++ linux-4.16.7/tools/perf/util/symbol.h	2018-05-07 14:09:20.616380161 -0400
+@@ -62,9 +62,20 @@
+ 	u8		ignore:1;
+ 	u8		inlined:1;
+ 	u8		arch_sym;
++	int ncf_edges;
++	struct cf_edge * cf_edges;
+ 	char		name[0];
+ };
+ 
++struct cf_edge {
++	struct symbol * sym_from;
++	struct symbol * sym_to;
++	u64 off_from;
++	u64 off_to;
++	bool predicted;
++	u64 count;
++};
++
+ void symbol__delete(struct symbol *sym);
+ void symbols__delete(struct rb_root *symbols);
+ 
+@@ -299,6 +310,7 @@
+ 				 bool unknown_as_addr, FILE *fp);
+ size_t symbol__fprintf_symname(const struct symbol *sym, FILE *fp);
+ size_t symbol__fprintf(struct symbol *sym, FILE *fp);
++size_t symbol__fprintf_cf(struct symbol *sym, FILE *fp);
+ bool symbol_type__is_a(char symbol_type, enum map_type map_type);
+ bool symbol__restricted_filename(const char *filename,
+ 				 const char *restricted_filename);
+@@ -383,6 +395,9 @@
+ int cleanup_sdt_note_list(struct list_head *sdt_notes);
+ int sdt_notes__get_count(struct list_head *start);
+ 
++void inc_br_count(struct symbol * sym_from, struct symbol * sym_to, 
++                  u64 off_from, u64 off_to, bool predicted);
++
+ #define SDT_BASE_SCN ".stapsdt.base"
+ #define SDT_NOTE_SCN  ".note.stapsdt"
+ #define SDT_NOTE_TYPE 3
