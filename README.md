@@ -21,3 +21,6 @@ It relies on LBR technology (last branch record), which is available on most Int
 
 ### Large page support
   Passing "-Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000" ensures that the hot code is loaded onto large 2MB pages.
+  To test this feature, run
+
+  * make optimize-lp

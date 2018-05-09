@@ -3,7 +3,10 @@
 
 require 'json'
 require 'set'
-require 'graphviz' rescue LoadError
+begin
+	require 'graphviz'
+rescue LoadError
+end
 
 class DSO
 	@@dso_count = 0
