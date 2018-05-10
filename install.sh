@@ -115,11 +115,14 @@ echo "building..."
 if [ $PERF_STATE -eq "2" ]; then
 	echo "building linux perf... (Look at ${STATES_DIR}/perf.log to monitor build output)"
 	echo "checking if libelf-dev is installed"
+        echo "int main() {return 0;}" > test.c
         set +e
-        res=$(dpkg-query -W -f='${Status}' libelf-dev)
+        gcc test.c -lelf
         ec=$?
+        rm test.c
 	if [ $ec -eq 0 ]; then
                 echo "Success: libelf-dev is installed"
+                rm a.out
         else
 		echo "Failed: libelf-dev is required: Please install it using sudo apt-get install libelf-dev"
 		exit -1
