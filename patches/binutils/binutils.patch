@@ -75,7 +75,7 @@ diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
     };
   
     for (size_t i = 0;
---- 1125,1135 ----
+--- 1125,1134 ----
     static const char* const text_section_sort[] =
     {
       ".text.unlikely",
@@ -83,13 +83,12 @@ diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
       ".text.exit",
       ".text.startup",
 !     ".text.hot",
-!     ".text.stitch.hot",
     };
   
     for (size_t i = 0;
 ***************
 *** 1849,1854 ****
---- 1851,1862 ----
+--- 1850,1861 ----
     if (this->sections_are_attached_)
       this->attach_section_to_segment(&parameters->target(), os);
   
@@ -104,7 +103,7 @@ diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
   
 ***************
 *** 1905,1910 ****
---- 1913,1920 ----
+--- 1912,1919 ----
   	    return ORDER_INIT;
   	  else if (strcmp(os->name(), ".fini") == 0)
   	    return ORDER_FINI;
@@ -115,7 +114,7 @@ diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
       }
 ***************
 *** 2686,2691 ****
---- 2696,2705 ----
+--- 2695,2704 ----
       {
         if (!line.empty() && line[line.length() - 1] == '\r')   // Windows
   	line.resize(line.length() - 1);
@@ -128,7 +127,7 @@ diff -rc ../binutils-2.30/gold/layout.cc binutils-2.30/gold/layout.cc
   	{
 ***************
 *** 5091,5096 ****
---- 5105,5111 ----
+--- 5104,5110 ----
   #define MAPPING_INIT_EXACT(f, t) { f, 0, t, sizeof(t) - 1 }
   const Layout::Section_name_mapping Layout::section_name_mapping[] =
   {

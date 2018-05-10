@@ -26,7 +26,7 @@ optimize: layout test.o test_util.a
 	$(CC)  $(LDFLAGS) $(CFLAGS) -Wl,-plugin-opt,-bb-layout=cs -Wl,-plugin-opt,-emit-bb-symbols test.o test_util.a -o test
 
 optimize-lp: layout test.o test_util.a
-	$(CC)  $(LDFLAGS) $(CFLAGS) -Wl,-plugin-opt,-bb-layout=cs -Wl,-plugin-opt,-emit-bb-symbols -Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000 test.o test_util.a -o test
+	$(CC)  $(LDFLAGS) $(CFLAGS) -Wl,-plugin-opt,-bb-layout=cs -Wl,-plugin-opt,-emit-bb-symbols -Wl,-plugin-opt,-enable-huge-pages -lhugepage_text_rt -L../build -Wl,-z,max-page-size=0x200000 -Wl,-no-text-reorder test.o test_util.a -o test
 
 clean:
 	rm -rf test.cs test.orig test test.layout.cs perf.data* *.o *.a
