@@ -1,0 +1,2 @@
+The LLVM patch includes code that enables exception handling when a function is split to multiple parts (mainly in lib/CodeGen/AsmPrinter/EHStreamer.cpp).
+This code is an extension of a work from Amaury Séchet: https://reviews.llvm.org/D17555
