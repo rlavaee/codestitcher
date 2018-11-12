@@ -8,7 +8,7 @@ class String
 end
 
 class Fixnum
-	def is_page?
-		eql?(64) || eql?(4 << 10) || eql?(2 << 20) 
-	end
+  def is_page?
+    eql?(64) || eql?(4 << 10) || eql?(2 << 20)
+  end
 end
