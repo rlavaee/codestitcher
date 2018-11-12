@@ -1,0 +1,7 @@
+### Amaury Séchet:
+  The LLVM patch includes code that enables exception handling when a function is split to multiple parts (this code is mainly
+  in lib/CodeGen/AsmPrinter/EHStreamer.cpp).
+  This code is an extension of a code patch submitted by Amaury Séchet: https://reviews.llvm.org/D17555.
+  Amaury's code patch enables exception handling when splitting a function into two parts. The modified code extends this to
+  support splitting a function into two or more parts.
+  Amaury has declared that his code patch is published under the LLVM license (University of Illinois/NCSA Open Source License).

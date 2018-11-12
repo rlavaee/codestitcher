@@ -2,6 +2,7 @@
 Codestitcher enables interprocedural basic block code layout optimization on Linux platforms.
 
 It relies on LBR technology (last branch record), which is available on most Intel CPUs.
+For more details, please see our arxiv paper: https://arxiv.org/abs/1810.00905
 
 ## To install:
   * run ./install.sh
