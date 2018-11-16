@@ -63,7 +63,7 @@ echo "downloading base sources..."
 if [ "$BINUTILS_STATE" -eq "0" ]; then
 	rm -rf ${BINUTILS_SRC_DIR}
 	echo "downloading binutils-2.30"
-	wget http://ftp.gnu.org/gnu/binutils/binutils-2.30.tar.xz -P ${SOURCE_DIR} -q
+	wget http://ftp.gnu.org/gnu/binutils/binutils-2.30.tar.xz -O ${SOURCE_DIR}/binutils-2.30.tar.xz -q
 	tar -xf ${SOURCE_DIR}/binutils-2.30.tar.xz -C ${SOURCE_DIR}
 	rm ${SOURCE_DIR}/binutils-2.30.tar.xz
 	BINUTILS_STATE=1

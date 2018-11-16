@@ -577,7 +577,6 @@ class PettisHansen < CodeLayout
     end
 
 
-    
     @dso.functions.each do |func|
       @in_edges[func].each do |pred_func,c|
         func_chain = @hot_chain_map[func]
@@ -815,7 +814,7 @@ class CodeStitcher < CodeLayout
     if(!cold_chain_set.empty?)
       chain_a = cold_chain_set.to_a
       top_chain = chain_a.shift
-      top_chain = chain_a.inject(top_chain) do |res,chain| 
+      top_chain = chain_a.inject(top_chain) do |res,chain|
         res.concat(chain)
         @all_chains.delete(chain)
         res
@@ -1029,7 +1028,7 @@ class CodeStitcher < CodeLayout
           if(distance < distance_limit)
             w = v[0] + v[1]
             w *= (distance_limit - distance) if distance_limit.is_page?
-            ltr_w += w  
+            ltr_w += w
           end
         end
       end

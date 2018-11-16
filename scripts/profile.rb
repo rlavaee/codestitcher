@@ -3,6 +3,8 @@
 
 require 'fileutils'
 
+LLVM_BIN = File.join(File.expand_path(File.dirname(__FILE__)), "..", "build", "llvm", "bin", "llvm-nm")
+
 class Profile < Hash
   attr_reader :prof_dso
   attr_accessor :updated
